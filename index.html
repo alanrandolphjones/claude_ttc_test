@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TTC Stop Map</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+  <style>
+    :root {
+      --bus: #da251d;
+      --streetcar: #0a7d3e;
+      --both: #7b3fa0;
+      --panel-bg: #ffffff;
+      --panel-fg: #1d1d1f;
+      --muted: #6b6b70;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --panel-bg: #1f1f22; --panel-fg: #f2f2f4; --muted: #a1a1a8; }
+    }
+    html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: #e5e3df; }
+    #map { position: absolute; inset: 0; }
+    #panel {
+      position: absolute; top: 12px; left: 56px; z-index: 1000;
+      background: var(--panel-bg); color: var(--panel-fg);
+      border-radius: 10px; box-shadow: 0 2px 12px rgba(0,0,0,.25);
+      padding: 12px 14px; width: 260px; max-width: calc(100vw - 88px); font-size: 14px;
+    }
+    #panel h1 { font-size: 16px; margin: 0 0 8px; }
+    #panel label { display: flex; align-items: center; gap: 6px; margin: 4px 0; cursor: pointer; }
+    #panel select, #panel input[type=search] { width: 100%; box-sizing: border-box; margin-top: 6px; padding: 5px 6px; font: inherit; }
+    .dot { width: 11px; height: 11px; border-radius: 50%; display: inline-block; border: 1.5px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.3); }
+    #status { color: var(--muted); margin-top: 8px; font-size: 12.5px; }
+    #bar { height: 4px; background: rgba(127,127,127,.25); border-radius: 2px; margin-top: 6px; overflow: hidden; }
+    #bar > div { height: 100%; width: 0; background: var(--bus); transition: width .2s; }
+    .popup h3 { margin: 0 0 4px; font-size: 14px; }
+    .popup .meta { color: #666; font-size: 12px; margin-bottom: 6px; }
+    .chip { display: inline-block; padding: 1px 6px; margin: 2px 2px 0 0; border-radius: 4px; color: #fff; font-size: 12px; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="panel">
+    <h1>TTC Bus &amp; Streetcar Stops</h1>
+    <label><input type="checkbox" id="showBus" checked> <span class="dot" style="background:var(--bus)"></span> Bus</label>
+    <label><input type="checkbox" id="showStreetcar" checked> <span class="dot" style="background:var(--streetcar)"></span> Streetcar</label>
+    <label style="color:var(--muted)"><span class="dot" style="background:var(--both)"></span> Served by both</label>
+    <select id="routeFilter"><option value="">All routes</option></select>
+    <input type="search" id="search" placeholder="Search stop name or number…">
+    <div id="bar"><div></div></div>
+    <div id="status">Loading routes…</div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script>
+    // Live data from the TTC's public real-time feed (Umo IQ / NextBus).
+    const API = 'https://retro.umoiq.com/service/publicJSONFeed?a=ttc';
+
+    // The live feed doesn't say which routes are streetcars. This list comes from
+    // the TTC's GTFS schedule (routes.txt, route_type = 0). Update it if routes change.
+    const STREETCAR_ROUTES = new Set(['301','303','304','305','306','310','312',
+      '501','503','504','505','506','507','508','509','510','511','512']);
+
+    const COLORS = { bus: '#da251d', streetcar: '#0a7d3e', both: '#7b3fa0' };
+
+    const map = L.map('map', { preferCanvas: true }).setView([43.70, -79.40], 11);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors · Stop data &copy; Toronto Transit Commission'
+    }).addTo(map);
+
+    const renderer = L.canvas({ padding: 0.5 });
+    const layer = L.layerGroup().addTo(map);
+    const stops = new Map();   // key -> { lat, lon, title, stopId, routes: Map(tag -> title) }
+    const routeTitles = new Map();
+
+    const $ = id => document.getElementById(id);
+    const status = msg => { $('status').textContent = msg; };
+    const progress = frac => { $('bar').firstElementChild.style.width = (frac * 100).toFixed(1) + '%'; };
+
+    const asArray = x => x == null ? [] : Array.isArray(x) ? x : [x];
+    const isStreetcar = tag => STREETCAR_ROUTES.has(tag);
+
+    async function getJSON(params, tries = 3) {
+      for (let i = 0; ; i++) {
+        try {
+          const res = await fetch(`${API}&${params}`);
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          const json = await res.json();
+          if (json.Error) throw new Error(json.Error.content || 'API error');
+          return json;
+        } catch (e) {
+          if (i >= tries - 1) throw e;
+          await new Promise(r => setTimeout(r, 500 * 2 ** i));
+        }
+      }
+    }
+
+    function addRoute(route) {
+      const tag = route.tag;
+      routeTitles.set(tag, route.title);
+      for (const s of asArray(route.stop)) {
+        // "_ar" tags are arrival-only duplicates of a terminal stop.
+        const key = s.stopId || s.tag.replace(/_ar$/, '');
+        let stop = stops.get(key);
+        if (!stop) {
+          stop = { lat: +s.lat, lon: +s.lon, title: s.title, stopId: s.stopId, routes: new Map() };
+          stops.set(key, stop);
+        }
+        stop.routes.set(tag, route.title);
+      }
+    }
+
+    function stopKind(stop, routeSet) {
+      let bus = false, car = false;
+      for (const tag of routeSet) (isStreetcar(tag) ? (car = true) : (bus = true));
+      return bus && car ? 'both' : car ? 'streetcar' : 'bus';
+    }
+
+    function popupHtml(stop) {
+      const tags = [...stop.routes.keys()].sort((a, b) => parseInt(a) - parseInt(b));
+      const chips = tags.map(t =>
+        `<span class="chip" style="background:${isStreetcar(t) ? COLORS.streetcar : COLORS.bus}" title="${escapeHtml(stop.routes.get(t))}">${t}</span>`
+      ).join('');
+      return `<div class="popup"><h3>${escapeHtml(stop.title)}</h3>
+        <div class="meta">${stop.stopId ? 'Stop #' + stop.stopId : 'No stop number'} · ${tags.length} route${tags.length === 1 ? '' : 's'}</div>
+        ${chips}</div>`;
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
+    function render() {
+      const showBus = $('showBus').checked, showCar = $('showStreetcar').checked;
+      const routeTag = $('routeFilter').value;
+      const q = $('search').value.trim().toLowerCase();
+      layer.clearLayers();
+      let shown = 0;
+      for (const stop of stops.values()) {
+        if (routeTag && !stop.routes.has(routeTag)) continue;
+        if (q && !stop.title.toLowerCase().includes(q) && !(stop.stopId || '').includes(q)) continue;
+        // Only count route types the user has switched on.
+        const visibleRoutes = [...stop.routes.keys()].filter(t => isStreetcar(t) ? showCar : showBus);
+        if (!visibleRoutes.length) continue;
+        const kind = stopKind(stop, visibleRoutes);
+        L.circleMarker([stop.lat, stop.lon], {
+          renderer, radius: 4, weight: 1, color: '#fff', fillColor: COLORS[kind], fillOpacity: 0.9
+        }).bindPopup(() => popupHtml(stop)).addTo(layer);
+        shown++;
+      }
+      return shown;
+    }
+
+    let loadedCount = 0, routeCount = 0;
+    function updateStatus(done = loadedCount, total = routeCount) {
+      loadedCount = done; routeCount = total;
+      const shown = render();
+      status(`${shown.toLocaleString()} stops shown · ${stops.size.toLocaleString()} total` +
+             (done < total ? ` · loading routes ${done}/${total}…` : ` · ${total} routes`));
+    }
+
+    async function load() {
+      let routes;
+      try {
+        routes = asArray((await getJSON('command=routeList')).route);
+      } catch (e) {
+        status('Could not reach the TTC feed: ' + e.message);
+        return;
+      }
+
+      let done = 0, failed = [], lastRender = 0;
+      const queue = routes.slice();
+      async function worker() {
+        while (queue.length) {
+          const r = queue.shift();
+          try {
+            const json = await getJSON(`command=routeConfig&r=${encodeURIComponent(r.tag)}&terse`);
+            addRoute(json.route);
+          } catch (e) {
+            failed.push(r.tag);
+          }
+          done++;
+          progress(done / routes.length);
+          // Redraw at most every 750 ms while loading so the map fills in progressively.
+          if (Date.now() - lastRender > 750) { lastRender = Date.now(); updateStatus(done, routes.length); }
+        }
+      }
+      await Promise.all(Array.from({ length: 8 }, worker));
+
+      const sel = $('routeFilter');
+      [...routeTitles.entries()]
+        .sort((a, b) => parseInt(a[0]) - parseInt(b[0]))
+        .forEach(([tag, title]) => sel.add(new Option(`${title}${isStreetcar(tag) ? ' (streetcar)' : ''}`, tag)));
+
+      updateStatus(done, routes.length);
+      if (failed.length) $('status').textContent += ` · failed: ${failed.join(', ')}`;
+      $('bar').style.display = 'none';
+    }
+
+    ['showBus', 'showStreetcar', 'routeFilter'].forEach(id => $(id).addEventListener('change', () => updateStatus()));
+    let t;
+    $('search').addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => updateStatus(), 200); });
+
+    $('routeFilter').addEventListener('change', () => {
+      const tag = $('routeFilter').value;
+      if (!tag) return;
+      const pts = [...stops.values()].filter(s => s.routes.has(tag)).map(s => [s.lat, s.lon]);
+      if (pts.length) map.fitBounds(pts, { padding: [40, 40] });
+    });
+
+    load();
+  </script>
+</body>
+</html>
