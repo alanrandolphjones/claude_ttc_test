@@ -35,6 +35,13 @@
     #bar > div { height: 100%; width: 0; background: var(--bus); transition: width .2s; }
     .popup h3 { margin: 0 0 4px; font-size: 14px; }
     .popup .meta { color: #666; font-size: 12px; margin-bottom: 6px; }
+    .arrivals { margin-top: 8px; border-top: 1px solid #ddd; padding-top: 6px; min-width: 220px; }
+    .arrivals .row { display: flex; align-items: baseline; gap: 8px; margin: 5px 0; }
+    .arrivals .row .chip { flex: none; }
+    .arrivals .dir { font-size: 12px; color: #444; line-height: 1.3; }
+    .arrivals .times { font-weight: 700; font-size: 13px; font-variant-numeric: tabular-nums; }
+    .arrivals .none { color: #888; font-size: 12px; }
+    .arrivals .updated { color: #888; font-size: 11px; margin-top: 6px; }
     .chip { display: inline-block; padding: 1px 6px; margin: 2px 2px 0 0; border-radius: 4px; color: #fff; font-size: 12px; font-weight: 600; }
   </style>
 </head>
@@ -105,10 +112,11 @@
         const key = s.stopId || s.tag.replace(/_ar$/, '');
         let stop = stops.get(key);
         if (!stop) {
-          stop = { lat: +s.lat, lon: +s.lon, title: s.title, stopId: s.stopId, routes: new Map() };
+          stop = { lat: +s.lat, lon: +s.lon, title: s.title, stopId: s.stopId, routes: new Map(), tags: new Map() };
           stops.set(key, stop);
         }
         stop.routes.set(tag, route.title);
+        stop.tags.set(tag, s.tag);
       }
     }
 
@@ -125,7 +133,76 @@
       ).join('');
       return `<div class="popup"><h3>${escapeHtml(stop.title)}</h3>
         <div class="meta">${stop.stopId ? 'Stop #' + stop.stopId : 'No stop number'} · ${tags.length} route${tags.length === 1 ? '' : 's'}</div>
-        ${chips}</div>`;
+        ${chips}
+        <div class="arrivals">Checking next arrivals…</div></div>`;
+    }
+
+    // Leaflet re-runs the content function whenever the popup updates, so keep one
+    // element per stop; arrival times written into it then survive popup.update().
+    // Keep popups clear of the filter panel (it covers the top of the map on phones).
+    function popupOptions() {
+      const panel = $('panel').getBoundingClientRect();
+      return { maxWidth: 300, autoPanPaddingTopLeft: L.point(10, panel.bottom + 10), autoPanPaddingBottomRight: L.point(10, 30) };
+    }
+
+    function popupEl(stop) {
+      if (!stop.el) {
+        stop.el = document.createElement('div');
+        stop.el.innerHTML = popupHtml(stop);
+      }
+      return stop.el;
+    }
+
+    // ---- Next-vehicle predictions -------------------------------------------
+    let arrivalsTimer = null, arrivalsSeq = 0;
+
+    function stopArrivals() { clearInterval(arrivalsTimer); arrivalsTimer = null; arrivalsSeq++; }
+
+    function startArrivals(stop, popup) {
+      stopArrivals();
+      const seq = arrivalsSeq;
+      const refresh = async () => {
+        let html;
+        try { html = arrivalsHtml(await fetchPredictions(stop)); }
+        catch (e) { html = `<div class="none">Couldn't load arrival times (${escapeHtml(e.message)}).</div>`; }
+        if (seq !== arrivalsSeq) return;   // popup closed or another stop opened meanwhile
+        const el = popupEl(stop).querySelector('.arrivals');
+        if (el) { el.innerHTML = html; popup.update(); }
+      };
+      refresh();
+      arrivalsTimer = setInterval(refresh, 30000);
+    }
+
+    async function fetchPredictions(stop) {
+      if (stop.stopId) {
+        return asArray((await getJSON(`command=predictions&stopId=${encodeURIComponent(stop.stopId)}`, 2)).predictions);
+      }
+      // Stops without a public stop number: ask per route, ignoring routes that error.
+      const results = await Promise.allSettled([...stop.tags].map(([r, s]) =>
+        getJSON(`command=predictions&r=${encodeURIComponent(r)}&s=${encodeURIComponent(s)}`, 1)));
+      const ok = results.filter(x => x.status === 'fulfilled');
+      if (!ok.length && results.length) throw results[0].reason;
+      return ok.flatMap(x => asArray(x.value.predictions));
+    }
+
+    function arrivalsHtml(predictions) {
+      const rows = [];
+      for (const p of predictions) {
+        for (const d of asArray(p.direction)) {
+          const preds = asArray(d.prediction)
+            .map(x => +x.seconds).filter(n => n >= 0).sort((a, b) => a - b).slice(0, 3);
+          if (!preds.length) continue;
+          rows.push({ route: p.routeTag, dir: d.title, first: preds[0], preds });
+        }
+      }
+      rows.sort((a, b) => a.first - b.first);
+      const fmt = sec => sec < 60 ? 'Due' : Math.floor(sec / 60) + ' min';
+      const now = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+      if (!rows.length) return `<div class="none">No vehicles predicted right now.</div><div class="updated">Checked ${now}</div>`;
+      return rows.map(r => `<div class="row">
+          <span class="chip" style="background:${isStreetcar(r.route) ? COLORS.streetcar : COLORS.bus}">${escapeHtml(r.route)}</span>
+          <div><div class="times">${r.preds.map(fmt).join(', ')}</div><div class="dir">${escapeHtml(r.dir)}</div></div>
+        </div>`).join('') + `<div class="updated">Live · updated ${now} · refreshes every 30s</div>`;
     }
 
     function escapeHtml(s) {
@@ -147,7 +224,10 @@
         const kind = stopKind(stop, visibleRoutes);
         L.circleMarker([stop.lat, stop.lon], {
           renderer, radius: 4, weight: 1, color: '#fff', fillColor: COLORS[kind], fillOpacity: 0.9
-        }).bindPopup(() => popupHtml(stop)).addTo(layer);
+        }).bindPopup(() => popupEl(stop), popupOptions())
+          .on('popupopen', e => startArrivals(stop, e.popup))
+          .on('popupclose', stopArrivals)
+          .addTo(layer);
         shown++;
       }
       return shown;
@@ -157,7 +237,7 @@
     function updateStatus(done = loadedCount, total = routeCount) {
       loadedCount = done; routeCount = total;
       const shown = render();
-      status(`${shown.toLocaleString()} stops shown · ${stops.size.toLocaleString()} total` +
+      status(`${shown.toLocaleString()} stop${shown === 1 ? '' : 's'} shown · ${stops.size.toLocaleString()} total` +
              (done < total ? ` · loading routes ${done}/${total}…` : ` · ${total} routes`));
     }
 
