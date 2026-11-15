@@ -30,6 +30,7 @@
     #panel h1 { font-size: 16px; margin: 0 0 8px; }
     #panel label { display: flex; align-items: center; gap: 6px; margin: 4px 0; cursor: pointer; }
     #panel select, #panel input[type=search] { width: 100%; box-sizing: border-box; margin-top: 6px; padding: 5px 6px; font: inherit; }
+    .dash { width: 18px; height: 0; border-top: 4px dashed var(--alert); display: inline-block; }
     .dot { width: 11px; height: 11px; border-radius: 50%; display: inline-block; border: 1.5px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.3); }
     #status { color: var(--muted); margin-top: 8px; font-size: 12.5px; }
     #bar { height: 4px; background: rgba(127,127,127,.25); border-radius: 2px; margin-top: 6px; overflow: hidden; }
@@ -72,6 +73,7 @@
     <label><input type="checkbox" id="showStreetcar" checked> <span class="dot" style="background:var(--streetcar)"></span> Streetcar</label>
     <label style="color:var(--muted)"><span class="dot" style="background:var(--both)"></span> Served by both</label>
     <label style="color:var(--muted)"><span class="dot" style="background:#fff;box-shadow:0 0 0 2.5px var(--alert)"></span> Detour / no service</label>
+    <label><input type="checkbox" id="showDetours" checked> <span class="dash"></span> Detour paths (TTC)</label>
     <select id="routeFilter"><option value="">All routes</option></select>
     <input type="search" id="search" placeholder="Search stop name or number…">
     <div id="bar"><div></div></div>
@@ -99,6 +101,7 @@
     }).addTo(map);
 
     const renderer = L.canvas({ padding: 0.5 });
+    const detourLayer = L.layerGroup().addTo(map);   // added first so stops draw on top
     const layer = L.layerGroup().addTo(map);
     const stops = new Map();   // key -> { lat, lon, title, stopId, routes: Map(tag -> title) }
     const routeTitles = new Map();
@@ -159,7 +162,7 @@
         `<span class="chip" style="background:${isStreetcar(t) ? COLORS.streetcar : COLORS.bus}" title="${escapeHtml(stop.routes.get(t))}">${t}</span>`
       ).join('');
       return `<div class="popup"><h3>${escapeHtml(stop.title)}</h3>
-        <div class="meta">${stop.stopId ? 'Stop #' + stop.stopId : 'No stop number'} · ${tags.length} route${tags.length === 1 ? '' : 's'}</div>
+        <div class="meta">${stop.stopId ? 'Stop #' + stop.stopId : 'No stop number'}${cornerOf(stop) ? ' · ' + escapeHtml(cornerOf(stop, true)) : ''} · ${tags.length} route${tags.length === 1 ? '' : 's'}</div>
         ${chips}
         <div class="arrivals">Checking next arrivals…</div></div>`;
     }
@@ -300,7 +303,79 @@
       return best;
     }
 
-    const stopLink = s => `<a class="go" href="#" data-goto="${escapeHtml(stopKeyOf(s))}">${escapeHtml(s.title)}</a>${s.stopId ? ' (#' + s.stopId + ')' : ''}`;
+    const stopLink = s => `<a class="go" href="#" data-goto="${escapeHtml(stopKeyOf(s))}">${escapeHtml(s.title)}</a>${s.stopId ? ' (#' + s.stopId + ')' : ''}` +
+      (cornerOf(s) ? `, <b>${escapeHtml(cornerOf(s))}</b>` : '');
+
+    // ---- Which corner is a stop on? -----------------------------------------
+    // Stops on opposite corners often share a name ("Bay St at College St"). The corner follows
+    // from the direction vehicles travel through the stop (they stop on the right-hand side)
+    // and whether the stop is before or after the cross street, judged against the middle of
+    // all the stops at that intersection.
+    const M_LAT = 110574, M_LON = 80487;
+    const CARD = ['north', 'east', 'south', 'west'];
+    const cardOf = deg => CARD[Math.round((((deg % 360) + 360) % 360) / 90) % 4];
+    const bearing = (a, b) => (Math.atan2((b.lon - a.lon) * M_LON, (b.lat - a.lat) * M_LAT) * 180 / Math.PI + 360) % 360;
+    const UNIT = { north: [0, 1], east: [1, 0], south: [0, -1], west: [-1, 0] };
+    const RIGHT_OF = { north: 'east', east: 'south', south: 'west', west: 'north' };
+    const OPPOSITE = { north: 'south', south: 'north', east: 'west', west: 'east' };
+
+    function splitTitle(t) {
+      const [main, cross] = t.split(/\s+at\s+/i);
+      return { main: (main || '').trim(), cross: (cross || '').replace(/\s+-\s+.*$/, '').replace(/\s+(north|south|east|west)\s+side$/i, '').trim() };
+    }
+
+    // Direction of travel arriving at the stop, from the stop before it on any route.
+    function travelDir(stop) {
+      for (const route of stop.routes.keys()) for (const d of routeDirs.get(route) || []) {
+        const i = d.keys.indexOf(stop.key);
+        if (i < 0) continue;
+        const prev = i > 0 && stops.get(d.keys[i - 1]), next = i + 1 < d.keys.length && stops.get(d.keys[i + 1]);
+        if (prev && metres(prev, stop) > 15) return cardOf(bearing(prev, stop));
+        if (next && metres(stop, next) > 15) return cardOf(bearing(stop, next));
+      }
+      return null;
+    }
+
+    function intersectionCentre(stop, main, cross) {
+      const a = streetKey(main), b = streetKey(cross);
+      if (!a || !b) return null;
+      let n = 0, latMin = 90, latMax = -90, lonMin = 180, lonMax = -180;
+      for (const s of stops.values()) {
+        if (Math.abs(s.lat - stop.lat) > 0.0012 || Math.abs(s.lon - stop.lon) > 0.0016) continue;   // ~130 m box
+        const t = splitTitle(s.title), x = streetKey(t.main), y = streetKey(t.cross);
+        if (!((x === a && y === b) || (x === b && y === a))) continue;
+        n++; latMin = Math.min(latMin, s.lat); latMax = Math.max(latMax, s.lat); lonMin = Math.min(lonMin, s.lon); lonMax = Math.max(lonMax, s.lon);
+      }
+      return n >= 2 ? { lat: (latMin + latMax) / 2, lon: (lonMin + lonMax) / 2 } : null;
+    }
+
+    // "southeast corner" (or "east side" mid-block); withTravel adds "northbound".
+    function cornerOf(stop, withTravel = false) {
+      if (stop.corner === undefined) {
+        const dir = travelDir(stop);
+        let label = null;
+        if (dir) {
+          const side = RIGHT_OF[dir];
+          const { main, cross } = splitTitle(stop.title);
+          const c = cross && intersectionCentre(stop, main, cross);
+          label = side + ' side';
+          if (c) {
+            const [ux, uy] = UNIT[dir];
+            const along = (stop.lon - c.lon) * M_LON * ux + (stop.lat - c.lat) * M_LAT * uy;
+            if (Math.abs(along) >= 6) {
+              const pos = along < 0 ? OPPOSITE[dir] : dir;                // before the cross street, or past it
+              const ns = [pos, side].find(x => x === 'north' || x === 'south');
+              const ew = [pos, side].find(x => x === 'east' || x === 'west');
+              if (ns && ew) label = ns + ew + ' corner';
+            }
+          }
+        }
+        stop.corner = label;
+        stop.travel = dir;
+      }
+      if (!stop.corner) return '';
+      return withTravel && stop.travel ? `${stop.corner}, ${stop.travel}bound` : stop.corner;
+    }
     const stopKeyOf = s => s.key;
     const SHUTTLE_RE = /shuttle|replacement bus|buses are (running|replacing)|bus(es)? replac/i;
 
@@ -410,6 +485,55 @@
       }).join('');
     }
 
+    // ---- Detour paths (TTC GTFS-realtime trip modifications, via server.js) ----------------
+    let detours = [];
+    const torontoYmd = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/Toronto' }).replace(/-/g, '');
+    const ymdText = d => new Date(+d.slice(0, 4), +d.slice(4, 6) - 1, +d.slice(6)).toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' });
+
+    async function loadDetours() {
+      try {
+        const res = await fetch('api/detours', { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        detours = (await res.json()).detours || [];
+      } catch { detours = []; }
+      drawDetours();
+    }
+
+    function drawDetours() {
+      detourLayer.clearLayers();
+      if (!$('showDetours').checked) return;
+      const routeTag = $('routeFilter').value, today = torontoYmd();
+      for (const d of detours) {
+        if (routeTag && d.route !== routeTag) continue;
+        const running = d.serviceDates.includes(today);
+        const dates = d.serviceDates.length ? `${ymdText(d.serviceDates[0])} to ${ymdText(d.serviceDates[d.serviceDates.length - 1])}` : '';
+        L.polyline(d.path, { renderer, color: running ? '#f08c00' : '#8a6fc0', weight: 5, opacity: 0.9, dashArray: '10 7', lineCap: 'round' })
+          .bindPopup(`<div class="popup"><h3>${escapeHtml(d.route)} detour</h3>
+            <div class="meta">Towards ${escapeHtml(d.headsigns.join(', '))}</div>
+            ${running ? 'Running today' : 'Planned'}${dates ? ' · ' + escapeHtml(dates) : ''}<br>
+            <span class="meta">Path from the TTC's detour feed. The dashed line is where vehicles leave the regular route.</span></div>`)
+          .addTo(detourLayer);
+      }
+    }
+
+    function detourNoteHtml(stop) {
+      const routes = [...stop.routes.keys()].filter(r => detours.some(d => d.route === r));
+      if (!routes.length) return '';
+      return `<div class="advisory info"><b>${escapeHtml(routes.join(' / '))}</b> ${routes.length === 1 ? 'has' : 'have'} a detour path from the TTC. ` +
+        routes.map(r => `<a class="go" href="#" data-detour="${escapeHtml(r)}">Show ${escapeHtml(r)} detour</a>`).join(' · ') + `</div>`;
+    }
+
+    document.addEventListener('click', e => {
+      const a = e.target.closest('a[data-detour]');
+      if (!a) return;
+      e.preventDefault();
+      const pts = detours.filter(d => d.route === a.dataset.detour).flatMap(d => d.path);
+      if (!pts.length) return;
+      if (!$('showDetours').checked) { $('showDetours').checked = true; drawDetours(); }
+      map.closePopup();
+      map.fitBounds(pts, { padding: [60, 60], maxZoom: 17 });
+    });
+
     // Tapping a suggested stop jumps to it and opens its popup.
     document.addEventListener('click', e => {
       const a = e.target.closest('a[data-goto]');
@@ -471,7 +595,7 @@
         }
       }
       rows.sort((a, b) => a.bypassed - b.bypassed || a.first - b.first);
-      const advisory = advisoryHtml(stop, disruptions.filter(d => d.bypass)) + boardingHtml(stop) +
+      const advisory = advisoryHtml(stop, disruptions.filter(d => d.bypass)) + boardingHtml(stop) + detourNoteHtml(stop) +
                        (alertsOk === false ? '' : advisoryHtml(stop, disruptions.filter(d => !d.bypass)));
       const fmt = sec => sec < 60 ? 'Due' : Math.floor(sec / 60) + ' min';
       const now = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
@@ -556,7 +680,7 @@
       updateStatus(done, routes.length);
       if (failed.length) $('status').textContent += ` · failed: ${failed.join(', ')}`;
       $('bar').style.display = 'none';
-      await loadAlerts();
+      await Promise.all([loadAlerts(), loadDetours()]);
     }
 
     ['showBus', 'showStreetcar', 'routeFilter'].forEach(id => $(id).addEventListener('change', () => updateStatus()));
@@ -572,6 +696,9 @@
 
     load();
     setInterval(loadAlerts, 2 * 60 * 1000);
+    setInterval(loadDetours, 5 * 60 * 1000);
+    $('showDetours').addEventListener('change', drawDetours);
+    $('routeFilter').addEventListener('change', drawDetours);
   </script>
 </body>
 </html>

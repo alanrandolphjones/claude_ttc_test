@@ -28,9 +28,34 @@ A single-page map of every TTC bus and streetcar stop.
   direction, streetcar and replacement bus separately, with walking distance. This uses the
   live route data, which already includes the detour, so it works even when an alert doesn't
   name stops.
+- **Corner labels:** stops on opposite corners often share a name ("Bay St at College St").
+  Each stop is labelled with its corner ("southeast corner, northbound"), worked out from the
+  direction vehicles travel through it and where it sits relative to the other stops at that
+  intersection. Mid-block stops get the side of the street.
+- **Detour paths:** drawn as dashed lines from the TTC's GTFS-realtime detour feed
+  (`gtfsrt.ttc.ca/trips/detour`), trimmed to the part that leaves the route's scheduled path
+  (from the published GTFS schedule). Orange = running today, purple = planned.
 - **Bus vs streetcar:** the live feed doesn't label vehicle type, so the streetcar route
   list in `index.html` (`STREETCAR_ROUTES`) is taken from the TTC's GTFS schedule data
   (Toronto Open Data, `routes.txt` where `route_type = 0`).
+
+## Feed-disagreement observer
+
+The TTC's sources don't always agree: an alert may say stops are skipped while the live feed
+still predicts arrivals there, or the alert text and the live route data may describe
+different routings. To learn which source to believe, the server checks every route with a
+service change every 5 minutes and records where vehicles actually are against:
+
+- the live route data (what drives arrival predictions),
+- the scheduled path (published GTFS),
+- the detour feed's path,
+- and, for stops an alert says are skipped, whether the live feed still predicts there and
+  whether any vehicle was seen at them.
+
+Observations go to `data/observations/YYYY-MM-DD.jsonl`. See the findings with
+`node report.js [days]` (add `--now` to run a check first) or at `/api/observations?days=N`.
+"Likely ghost times" means a skipped stop kept getting predictions for at least an hour with
+no vehicle ever seen there.
 
 ## Run it
 
@@ -41,8 +66,14 @@ node server.js
 # then open http://localhost:8000   (set PORT to change the port)
 ```
 
-`server.js` serves the page and relays TTC service alerts at `/api/alerts`: it merges the
-live and GTFS-realtime feeds, removes duplicates, and caches the result for 60 seconds. The relay is needed because the TTC's alerts feed doesn't allow browsers
+`server.js` serves the page plus:
+
+- `/api/alerts`: TTC service alerts, merging the live and GTFS-realtime feeds (cached 60 s),
+- `/api/detours`: detour paths (cached 5 min),
+- `/api/observations`: the observer's findings.
+
+On first start it downloads the TTC's published schedule (about 30 MB, refreshed daily) into
+`data/` to know each route's normal path. Set `OBSERVE=0` to turn the observer off. The relay is needed because the TTC's alerts feed doesn't allow browsers
 to read it directly.
 
 The page also runs from any static host (GitHub Pages, or `python3 -m http.server`), but
