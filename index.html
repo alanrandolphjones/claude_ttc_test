@@ -27,7 +27,16 @@
       border-radius: 10px; box-shadow: 0 2px 12px rgba(0,0,0,.25);
       padding: 12px 14px; width: 260px; max-width: calc(100vw - 88px); font-size: 14px;
     }
-    #panel h1 { font-size: 16px; margin: 0 0 8px; }
+    #panel h1 { font-size: 16px; margin: 0; }
+    #panelToggle { all: unset; box-sizing: border-box; width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px; cursor: pointer; padding: 2px 0; }
+    #panelToggle:focus-visible { outline: 2px solid var(--bus); outline-offset: 3px; border-radius: 4px; }
+    #panelToggle .chev { width: 8px; height: 8px; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(-135deg) translate(-2px, -2px); transition: transform .15s; flex: none; }
+    #panel.collapsed #panelToggle .chev { transform: rotate(45deg) translate(-2px, -2px); }
+    #panelBody { margin-top: 8px; }
+    #panel.collapsed #panelBody { display: none; }
+    #panel.collapsed { padding-block: 9px; }
+    #panel.collapsed #status, #panel.collapsed #alertStatus { margin-top: 4px; }
+    @media (prefers-reduced-motion: reduce) { #panelToggle .chev { transition: none; } }
     #panel label { display: flex; align-items: center; gap: 6px; margin: 4px 0; cursor: pointer; }
     #panel select, #panel input[type=search] { width: 100%; box-sizing: border-box; margin-top: 6px; padding: 5px 6px; font: inherit; }
     .dash { width: 18px; height: 0; border-top: 4px dashed var(--alert); display: inline-block; }
@@ -68,7 +77,10 @@
 <body>
   <div id="map"></div>
   <div id="panel">
-    <h1>TTC Bus &amp; Streetcar Stops</h1>
+    <button id="panelToggle" type="button" aria-expanded="true" aria-controls="panelBody">
+      <h1>TTC Bus &amp; Streetcar Stops</h1><span class="chev" aria-hidden="true"></span>
+    </button>
+    <div id="panelBody">
     <label><input type="checkbox" id="showBus" checked> <span class="dot" style="background:var(--bus)"></span> Bus</label>
     <label><input type="checkbox" id="showStreetcar" checked> <span class="dot" style="background:var(--streetcar)"></span> Streetcar</label>
     <label style="color:var(--muted)"><span class="dot" style="background:var(--both)"></span> Served by both</label>
@@ -76,6 +88,7 @@
     <label><input type="checkbox" id="showDetours" checked> <span class="dash"></span> Detour paths (TTC)</label>
     <select id="routeFilter"><option value="">All routes</option></select>
     <input type="search" id="search" placeholder="Search stop name or number…">
+    </div>
     <div id="bar"><div></div></div>
     <div id="status">Loading routes…</div>
     <div id="alertStatus" style="color:var(--muted);font-size:12.5px;margin-top:4px"></div>
@@ -693,6 +706,20 @@
       const pts = [...stops.values()].filter(s => s.routes.has(tag)).map(s => [s.lat, s.lon]);
       if (pts.length) map.fitBounds(pts, { padding: [40, 40] });
     });
+
+    // Collapsible panel: starts collapsed on phones; remembers the viewer's choice.
+    function setPanel(open, remember) {
+      $('panel').classList.toggle('collapsed', !open);
+      $('panelToggle').setAttribute('aria-expanded', String(open));
+      if (remember) try { localStorage.setItem('panelOpen', open ? '1' : '0'); } catch { /* storage unavailable */ }
+      // Popups keep clear of the panel, whose height just changed.
+      const pad = popupOptions().autoPanPaddingTopLeft;
+      for (const st of stops.values()) { const pp = st.marker?.getPopup(); if (pp) pp.options.autoPanPaddingTopLeft = pad; }
+    }
+    let savedPanel = null;
+    try { savedPanel = localStorage.getItem('panelOpen'); } catch { /* storage unavailable */ }
+    setPanel(savedPanel ? savedPanel === '1' : window.innerWidth >= 700, false);
+    $('panelToggle').addEventListener('click', () => setPanel($('panel').classList.contains('collapsed'), true));
 
     load();
     setInterval(loadAlerts, 2 * 60 * 1000);
