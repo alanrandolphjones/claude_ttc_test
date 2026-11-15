@@ -46,6 +46,13 @@
     .advisory { margin: 6px 0 8px; padding: 8px 9px; border-radius: 6px; background: #fff4e0; border: 1px solid #f0b54a; color: #4a3000; font-size: 12.5px; line-height: 1.4; }
     .advisory.delay { background: #fffbe6; border-color: #e6cf5a; }
     .advisory.info { background: #eef4fb; border-color: #a9c4e4; color: #12314f; }
+    .advisory.upcoming { background: #f3f1f8; border-color: #c4bbdd; color: #2b2340; }
+    .advisory.board { background: #eaf6ef; border-color: #8cc8a3; color: #0d3b22; }
+    .advisory details { margin-top: 4px; }
+    .advisory summary { cursor: pointer; font-weight: 600; }
+    .advisory .desc { white-space: pre-line; margin-top: 4px; }
+    .advisory ul { margin: 4px 0 0; padding-left: 16px; }
+    .advisory li { margin: 3px 0; }
     .advisory b { font-weight: 700; }
     .advisory .head { font-weight: 700; margin-bottom: 3px; }
     .advisory .alt { margin-top: 6px; padding-top: 6px; border-top: 1px dashed rgba(0,0,0,.2); }
@@ -162,7 +169,7 @@
     // Keep popups clear of the filter panel (it covers the top of the map on phones).
     function popupOptions() {
       const panel = $('panel').getBoundingClientRect();
-      return { maxWidth: 300, autoPanPaddingTopLeft: L.point(10, panel.bottom + 10), autoPanPaddingBottomRight: L.point(10, 30) };
+      return { maxWidth: 300, maxHeight: Math.round(window.innerHeight * 0.55), autoPanPaddingTopLeft: L.point(10, panel.bottom + 10), autoPanPaddingBottomRight: L.point(10, 30) };
     }
 
     function popupEl(stop) {
@@ -180,9 +187,17 @@
     const BYPASS = new Set(['DETOUR', 'NO_SERVICE', 'REDUCED_SERVICE', 'STOP_MOVED', 'MODIFIED_SERVICE']);
     let alerts = [], alertsOk = null, affectedKeys = new Set();
 
-    function isActive(a, now = Date.now()) {
-      const start = Date.parse(a.activePeriod?.start), end = a.activePeriod?.end || '';
-      return !(start > now) && (end.startsWith('0001') || !(Date.parse(end) < now));
+    // alerts.ttc.ca marks "no end" as year 0001; GTFS-realtime alerts may have several periods.
+    const periodsOf = a => (a.activePeriods?.length ? a.activePeriods : [a.activePeriod || {}]).map(p => ({
+      start: p.start ? Date.parse(p.start) : -Infinity,
+      end: !p.end || p.end.startsWith('0001') ? Infinity : Date.parse(p.end),
+    }));
+    const UPCOMING_MS = 14 * 24 * 3600 * 1000;   // also show planned changes starting in the next two weeks
+    function timing(a, now = Date.now()) {
+      const ps = periodsOf(a);
+      if (ps.some(p => p.start <= now && now < p.end)) return { state: 'active' };
+      const next = ps.filter(p => p.start > now && p.start - now < UPCOMING_MS).sort((x, y) => x.start - y.start)[0];
+      return next ? { state: 'upcoming', ...next } : { state: 'inactive' };
     }
 
     async function loadAlerts() {
@@ -191,17 +206,20 @@
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const json = await res.json();
         alerts = asArray(json.routes)
-          .filter(a => a.effect && a.effect !== 'NO_EFFECT' && isActive(a))
-          .map(a => ({ ...a, stopSet: new Set(asArray(a.stops).map(String)) }));
+          .map(a => ({ ...a, timing: timing(a) }))
+          .filter(a => a.effect && a.effect !== 'NO_EFFECT' && a.timing.state !== 'inactive')
+          // An upcoming alert never means "not stopping here" yet.
+          .map(a => ({ ...a, upcoming: a.timing.state === 'upcoming', stopSet: new Set(asArray(a.stops).map(String)) }));
         alertsOk = true;
       } catch (e) {
         alertsOk = false;
       }
-      const surface = alerts.filter(a => routeTitles.has(a.route) || !routeTitles.size);
-      const detours = surface.filter(a => BYPASS.has(a.effect)).length;
+      const surface = alerts.filter(a => !a.upcoming && (routeTitles.has(a.route) || !routeTitles.size));
+      const routesHit = new Set(surface.map(a => a.route)).size;
+      const upcoming = new Set(alerts.filter(a => a.upcoming && routeTitles.has(a.route)).map(a => a.route)).size;
+      const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
       $('alertStatus').textContent = alertsOk
-        ? `${surface.length} active service alert${surface.length === 1 ? '' : 's'} on bus/streetcar routes` +
-          (detours ? ` · ${detours} detour${detours === 1 ? '' : 's'} or closure${detours === 1 ? '' : 's'}` : '')
+        ? `Service changes or alerts on ${plural(routesHit, 'route')} now` + (upcoming ? ` · ${upcoming} more planned soon` : '')
         : 'Detour info unavailable (TTC alerts could not be loaded).';
 
       const next = new Set();
@@ -225,9 +243,11 @@
         if (!stop.routes.has(a.route)) continue;
         const hitsStop = stop.stopId && a.stopSet.has(stop.stopId);
         if (!hitsStop && a.stopSet.size) continue;             // alert is about other stops on this route
-        out.push({ alert: a, route: a.route, bypass: hitsStop && BYPASS.has(a.effect), routeWide: !a.stopSet.size });
+        out.push({ alert: a, route: a.route, bypass: hitsStop && !a.upcoming && BYPASS.has(a.effect), routeWide: !a.stopSet.size });
       }
-      return out;
+      // Most urgent first: skipped here, then current changes, then upcoming ones.
+      const rank = d => d.bypass ? 0 : d.alert.upcoming ? 2 : 1;
+      return out.sort((x, y) => rank(x) - rank(y));
     }
 
     function metres(a, b) {
@@ -286,13 +306,26 @@
 
     function advisoryHtml(stop, disruptions) {
       if (alertsOk === false) return `<div class="advisory info">Detour info is unavailable right now, so these times can't be checked against TTC service alerts.</div>`;
-      return disruptions.map(d => {
-        const a = d.alert, rt = escapeHtml(d.route);
+      // The same TTC alert often covers several routes (306 and 506): show it once.
+      const seen = new Map();
+      for (const d of disruptions) {
+        const k = d.bypass ? d.route + '|' + d.alert.id : 'a|' + d.alert.id + '|' + d.alert.source;
+        if (seen.has(k)) seen.get(k).routes.push(d.route); else seen.set(k, { ...d, routes: [d.route] });
+      }
+      return [...seen.values()].map(d => {
+        const a = d.alert, rt = escapeHtml(d.routes.join(' / '));
         const text = escapeHtml(a.headerText || a.title || '');
         const dirNote = a.direction && !/both/i.test(a.direction) ? ` ${escapeHtml(a.direction.toLowerCase())}` : '';
         if (!d.bypass) {
-          const cls = a.effect === 'SIGNIFICANT_DELAYS' ? 'delay' : 'info';
-          return `<div class="advisory ${cls}"><div class="head">${rt}: ${escapeHtml(a.effectDesc || 'Service alert')}${d.routeWide ? ' on this route' : ''}</div>${text}</div>`;
+          const cls = a.upcoming ? 'upcoming' : a.effect === 'SIGNIFICANT_DELAYS' ? 'delay' : 'info';
+          const head = a.upcoming ? `${rt}: planned change ${escapeHtml(whenText(a.timing))}`
+            : `${rt}: ${escapeHtml(a.effectDesc || 'Service alert')}${d.routeWide ? ' on this route' : ' at this stop'}`;
+          const summary = escapeHtml(cleanHeader(a.headerText || a.title || '', d.route));
+          const desc = a.description && a.description !== a.headerText ? a.description : '';
+          return `<div class="advisory ${cls}"><div class="head">${head}</div>${summary}` +
+            (desc ? `<details${a.upcoming ? '' : ' open'}><summary>Details</summary><div class="desc">${escapeHtml(desc)}</div></details>` : '') +
+            (a.url ? `<div class="src"><a class="go" href="${escapeHtml(a.url)}" target="_blank" rel="noopener">TTC advisory</a></div>` : '') +
+            `</div>`;
         }
         let html = `<div class="advisory"><div class="head">${rt}${dirNote} is not stopping here</div>${text}`;
         const regular = nearestRegularStop(stop, d);
@@ -306,6 +339,74 @@
                   `${a.shuttleStart ? ' from ' + escapeHtml(a.shuttleStart) : ''}${a.shuttleEnd ? ' to ' + escapeHtml(a.shuttleEnd) : ''}.</div>`;
         html += `<div class="src">Source: TTC service alerts</div></div>`;
         return html;
+      }).join('');
+    }
+
+    // TTC headers sometimes start with a dash or repeat the route ("506 Carlton – ...").
+    const cleanHeader = (t, route) => t.replace(/^\s*[–—-]\s*/, '').trim();
+    const TZ = { timeZone: 'America/Toronto' };
+    function whenText(t) {
+      const day = new Date(t.start).toLocaleDateString('en-CA', { ...TZ, weekday: 'short', month: 'short', day: 'numeric' });
+      const time = ms => new Date(ms).toLocaleTimeString('en-CA', { ...TZ, hour: 'numeric', minute: '2-digit' });
+      return `starting ${day}, ${time(t.start)}` + (Number.isFinite(t.end) ? ` until ${new Date(t.end).toLocaleDateString('en-CA', { ...TZ, month: 'short', day: 'numeric' }) === new Date(t.start).toLocaleDateString('en-CA', { ...TZ, month: 'short', day: 'numeric' }) ? time(t.end) : new Date(t.end).toLocaleDateString('en-CA', { ...TZ, weekday: 'short', month: 'short', day: 'numeric' })}` : '');
+    }
+
+    // ---- "Does my direction stop here?" -------------------------------------
+    // Each side of the street is its own stop, so a stop normally serves one direction and the
+    // opposite direction stops across the street. If a route has no stop for some direction
+    // anywhere near this corner (a detour, a one-way street, a replacement bus on another road),
+    // say so and list where that direction can be boarded instead.
+    const NEARBY_M = 120, ALT_MAX_M = 1500;
+    const DIR_NAME = { north: 'Northbound', south: 'Southbound', east: 'Eastbound', west: 'Westbound' };
+
+    function missingDirections(stop) {
+      const out = [];
+      for (const route of stop.routes.keys()) {
+        // Only when the TTC reports a change on this route now; otherwise loops, terminals and
+        // one-way streets would trigger it on normal days.
+        if (!alerts.some(a => a.route === route && !a.upcoming)) continue;
+        const dirs = routeDirs.get(route) || [];
+        // A route's first or last stop has no opposite direction by nature.
+        if (dirs.some(d => d.keys[0] === stop.key || d.keys[d.keys.length - 1] === stop.key)) continue;
+        const here = new Set(dirs.filter(d => d.keys.includes(stop.key)).map(d => dirWord(d.title)));
+        for (const w of new Set(dirs.map(d => dirWord(d.title)).filter(Boolean))) {
+          if (here.has(w)) continue;
+          const opts = [];
+          for (const d of dirs.filter(d => dirWord(d.title) === w)) {
+            let best = null;
+            for (const k of d.keys) {
+              const s = stops.get(k);
+              if (!s) continue;
+              const m = metres(stop, s);
+              if (!best || m < best.m) best = { stop: s, m };
+            }
+            if (best) opts.push({ dir: d, ...best });
+          }
+          if (!opts.length || opts.some(o => o.m <= NEARBY_M)) continue;   // boards across the street: normal
+          const near = opts.filter(o => o.m <= ALT_MAX_M).sort((a, b) => a.m - b.m);
+          if (near.length) out.push({ route, word: w, opts: near });
+        }
+      }
+      return out;
+    }
+
+    function boardingHtml(stop) {
+      // Routes sharing the same alternatives (e.g. 306 and 506) get one box.
+      const groups = new Map();
+      for (const x of missingDirections(stop)) {
+        const sig = x.word + '|' + x.opts.map(o => o.stop.key + (/bus/i.test(o.dir.title) ? 'b' : 's')).join(',');
+        if (!groups.has(sig)) groups.set(sig, { ...x, routes: [] });
+        groups.get(sig).routes.push(x.route);
+      }
+      return [...groups.values()].map(x => {
+        const items = x.opts.map(o => {
+          // "West - 506 Carlton towards High Park" -> "Carlton towards High Park" (shared by 306/506).
+          const name = o.dir.title.replace(/^\w+\s*-\s*/, '').replace(/^\d+[a-z]?\s+/i, '');
+          const kind = isStreetcar(x.route) ? (/bus/i.test(o.dir.title) ? ' (bus)' : ' (streetcar)') : '';
+          return `<li><b>${escapeHtml(name)}${kind}</b>: ${stopLink(o.stop)}, ${walk(o.m)}</li>`;
+        }).join('');
+        return `<div class="advisory board"><div class="head">${DIR_NAME[x.word]} ${escapeHtml(x.routes.join(' / '))} doesn't stop at this corner right now</div>` +
+          `Board ${DIR_NAME[x.word].toLowerCase()} at:<ul>${items}</ul></div>`;
       }).join('');
     }
 
@@ -370,7 +471,8 @@
         }
       }
       rows.sort((a, b) => a.bypassed - b.bypassed || a.first - b.first);
-      const advisory = advisoryHtml(stop, disruptions);
+      const advisory = advisoryHtml(stop, disruptions.filter(d => d.bypass)) + boardingHtml(stop) +
+                       (alertsOk === false ? '' : advisoryHtml(stop, disruptions.filter(d => !d.bypass)));
       const fmt = sec => sec < 60 ? 'Due' : Math.floor(sec / 60) + ' min';
       const now = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
       if (!rows.length) return advisory + `<div class="none">No vehicles predicted right now.</div><div class="updated">Checked ${now}</div>`;
