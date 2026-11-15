@@ -11,6 +11,7 @@
       --bus: #da251d;
       --streetcar: #0a7d3e;
       --both: #7b3fa0;
+      --alert: #f08c00;
       --panel-bg: #ffffff;
       --panel-fg: #1d1d1f;
       --muted: #6b6b70;
@@ -42,6 +43,17 @@
     .arrivals .times { font-weight: 700; font-size: 13px; font-variant-numeric: tabular-nums; }
     .arrivals .none { color: #888; font-size: 12px; }
     .arrivals .updated { color: #888; font-size: 11px; margin-top: 6px; }
+    .advisory { margin: 6px 0 8px; padding: 8px 9px; border-radius: 6px; background: #fff4e0; border: 1px solid #f0b54a; color: #4a3000; font-size: 12.5px; line-height: 1.4; }
+    .advisory.delay { background: #fffbe6; border-color: #e6cf5a; }
+    .advisory.info { background: #eef4fb; border-color: #a9c4e4; color: #12314f; }
+    .advisory b { font-weight: 700; }
+    .advisory .head { font-weight: 700; margin-bottom: 3px; }
+    .advisory .alt { margin-top: 6px; padding-top: 6px; border-top: 1px dashed rgba(0,0,0,.2); }
+    .advisory a.go { color: inherit; font-weight: 600; }
+    .advisory .src { margin-top: 4px; font-size: 11.5px; opacity: .8; }
+    .arrivals .row.bypassed .times { text-decoration: line-through; color: #999; }
+    .arrivals .flag { display: inline-block; font-size: 11px; font-weight: 700; color: #a15c00; margin-left: 4px; text-decoration: none; }
+    .arrivals .shuttle { display: inline-block; font-size: 11px; font-weight: 700; color: #fff; background: #555; border-radius: 3px; padding: 0 4px; margin-left: 4px; }
     .chip { display: inline-block; padding: 1px 6px; margin: 2px 2px 0 0; border-radius: 4px; color: #fff; font-size: 12px; font-weight: 600; }
   </style>
 </head>
@@ -52,10 +64,12 @@
     <label><input type="checkbox" id="showBus" checked> <span class="dot" style="background:var(--bus)"></span> Bus</label>
     <label><input type="checkbox" id="showStreetcar" checked> <span class="dot" style="background:var(--streetcar)"></span> Streetcar</label>
     <label style="color:var(--muted)"><span class="dot" style="background:var(--both)"></span> Served by both</label>
+    <label style="color:var(--muted)"><span class="dot" style="background:#fff;box-shadow:0 0 0 2.5px var(--alert)"></span> Detour / no service</label>
     <select id="routeFilter"><option value="">All routes</option></select>
     <input type="search" id="search" placeholder="Search stop name or number…">
     <div id="bar"><div></div></div>
     <div id="status">Loading routes…</div>
+    <div id="alertStatus" style="color:var(--muted);font-size:12.5px;margin-top:4px"></div>
   </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
@@ -81,6 +95,8 @@
     const layer = L.layerGroup().addTo(map);
     const stops = new Map();   // key -> { lat, lon, title, stopId, routes: Map(tag -> title) }
     const routeTitles = new Map();
+    const routeDirs = new Map(); // route tag -> [{ title, keys: [stop keys in order] }]
+    const stopKey = s => s.stopId || s.tag.replace(/_ar$/, '');
 
     const $ = id => document.getElementById(id);
     const status = msg => { $('status').textContent = msg; };
@@ -109,15 +125,19 @@
       routeTitles.set(tag, route.title);
       for (const s of asArray(route.stop)) {
         // "_ar" tags are arrival-only duplicates of a terminal stop.
-        const key = s.stopId || s.tag.replace(/_ar$/, '');
+        const key = stopKey(s);
         let stop = stops.get(key);
         if (!stop) {
-          stop = { lat: +s.lat, lon: +s.lon, title: s.title, stopId: s.stopId, routes: new Map(), tags: new Map() };
+          stop = { key, lat: +s.lat, lon: +s.lon, title: s.title, stopId: s.stopId, routes: new Map(), tags: new Map() };
           stops.set(key, stop);
         }
         stop.routes.set(tag, route.title);
         stop.tags.set(tag, s.tag);
       }
+      const tagToKey = new Map(asArray(route.stop).map(s => [s.tag, stopKey(s)]));
+      routeDirs.set(tag, asArray(route.direction).map(d => ({
+        title: d.title, keys: asArray(d.stop).map(x => tagToKey.get(x.tag)).filter(Boolean)
+      })));
     }
 
     function stopKind(stop, routeSet) {
@@ -153,6 +173,154 @@
       return stop.el;
     }
 
+    // ---- Service alerts & detours ---------------------------------------------
+    // TTC alerts (alerts.ttc.ca) list the stop numbers each detour or closure skips.
+    // The TTC doesn't allow browsers to read that feed directly, so server.js relays it.
+    const ALERTS_URL = 'api/alerts';
+    const BYPASS = new Set(['DETOUR', 'NO_SERVICE', 'REDUCED_SERVICE', 'STOP_MOVED', 'MODIFIED_SERVICE']);
+    let alerts = [], alertsOk = null, affectedKeys = new Set();
+
+    function isActive(a, now = Date.now()) {
+      const start = Date.parse(a.activePeriod?.start), end = a.activePeriod?.end || '';
+      return !(start > now) && (end.startsWith('0001') || !(Date.parse(end) < now));
+    }
+
+    async function loadAlerts() {
+      try {
+        const res = await fetch(ALERTS_URL, { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const json = await res.json();
+        alerts = asArray(json.routes)
+          .filter(a => a.effect && a.effect !== 'NO_EFFECT' && isActive(a))
+          .map(a => ({ ...a, stopSet: new Set(asArray(a.stops).map(String)) }));
+        alertsOk = true;
+      } catch (e) {
+        alertsOk = false;
+      }
+      const surface = alerts.filter(a => routeTitles.has(a.route) || !routeTitles.size);
+      const detours = surface.filter(a => BYPASS.has(a.effect)).length;
+      $('alertStatus').textContent = alertsOk
+        ? `${surface.length} active service alert${surface.length === 1 ? '' : 's'} on bus/streetcar routes` +
+          (detours ? ` · ${detours} detour${detours === 1 ? '' : 's'} or closure${detours === 1 ? '' : 's'}` : '')
+        : 'Detour info unavailable (TTC alerts could not be loaded).';
+
+      const next = new Set();
+      for (const [key, stop] of stops) if (stopDisruptions(stop).some(d => d.bypass)) next.add(key);
+      const changed = next.size !== affectedKeys.size || [...next].some(k => !affectedKeys.has(k));
+      affectedKeys = next;
+      // Redraw only when something changed and no popup is open (redrawing closes it).
+      if (changed && stops.size && !map._popup?.isOpen()) updateStatus();
+    }
+
+    const dirWord = s => (String(s).match(/\b(north|south|east|west)/i) || [])[1]?.toLowerCase();
+    function dirMatches(alertDir, dirTitle) {
+      const a = dirWord(alertDir);
+      return !a || /both/i.test(alertDir) || dirWord(dirTitle) === a;
+    }
+
+    // Every active alert touching this stop, per route.
+    function stopDisruptions(stop) {
+      const out = [];
+      for (const a of alerts) {
+        if (!stop.routes.has(a.route)) continue;
+        const hitsStop = stop.stopId && a.stopSet.has(stop.stopId);
+        if (!hitsStop && a.stopSet.size) continue;             // alert is about other stops on this route
+        out.push({ alert: a, route: a.route, bypass: hitsStop && BYPASS.has(a.effect), routeWide: !a.stopSet.size });
+      }
+      return out;
+    }
+
+    function metres(a, b) {
+      const R = 6371000, rad = Math.PI / 180;
+      const dLat = (b.lat - a.lat) * rad, dLon = (b.lon - a.lon) * rad;
+      const h = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(dLon / 2) ** 2;
+      return 2 * R * Math.asin(Math.sqrt(h));
+    }
+    const walk = m => `${m < 1000 ? Math.round(m / 10) * 10 + ' m' : (m / 1000).toFixed(1) + ' km'}, about ${Math.max(1, Math.round(m / 80))} min walk`;
+
+    // Nearest stop on the same route and direction that the alert doesn't skip.
+    function nearestRegularStop(stop, d) {
+      const key = stopKey({ stopId: stop.stopId, tag: stop.tags.get(d.route) || '' });
+      let best = null;
+      for (const dir of routeDirs.get(d.route) || []) {
+        if (!dir.keys.includes(key) || !dirMatches(d.alert.direction, dir.title)) continue;
+        for (const k of dir.keys) {
+          const s = stops.get(k);
+          if (!s || s === stop || (s.stopId && d.alert.stopSet.has(s.stopId))) continue;
+          const m = metres(stop, s);
+          if (!best || m < best.m) best = { stop: s, m };
+        }
+      }
+      return best;
+    }
+
+    // Street names a detour runs on, from text like "Detour via Church St, Maitland St and Jarvis St".
+    const SUFFIX = /\b(st|street|ave|avenue|rd|road|blvd|boulevard|dr|drive|cres|crescent|crt|court|pkwy|parkway|hwy|ln|lane|way|cir|circle|trl|trail|gate|gdns|pl|place|sq|e|w|n|s|east|west|north|south)\b\.?/g;
+    const streetKey = name => name.toLowerCase().replace(/[.']/g, '').replace(SUFFIX, ' ').replace(/\s+/g, ' ').trim();
+    function detourStreets(text) {
+      const out = new Set();
+      const grab = re => { const m = text.match(re); if (m) m[1].split(/,\s*|\s+and\s+|\s*&\s*/i).forEach(n => { const k = streetKey(n); if (k) out.add(k); }); };
+      grab(/\bvia\s+(.+?)(?:\s+(?:due to|between|from|until|while|because)\b|[.;]|$)/i);
+      grab(/\b(?:running|operating|diverting|divert)\s+(?:on|along)\s+(.+?)(?:\s+(?:due to|between|from|until|while)\b|[.;]|$)/i);
+      return out;
+    }
+
+    // Closest existing stop on one of the detour streets (detoured vehicles use stops along the detour).
+    function nearestDetourStop(stop, d) {
+      const streets = detourStreets(`${d.alert.title || ''} ${d.alert.headerText || ''} ${d.alert.description || ''}`);
+      if (!streets.size) return null;
+      let best = null;
+      for (const s of stops.values()) {
+        if (s === stop || (s.stopId && d.alert.stopSet.has(s.stopId))) continue;
+        const m = metres(stop, s);
+        if (m > 2000 || (best && m >= best.m)) continue;
+        const street = streetKey(s.title.split(/\s+at\s+/i)[0]);
+        if (streets.has(street)) best = { stop: s, m, street };
+      }
+      return best;
+    }
+
+    const stopLink = s => `<a class="go" href="#" data-goto="${escapeHtml(stopKeyOf(s))}">${escapeHtml(s.title)}</a>${s.stopId ? ' (#' + s.stopId + ')' : ''}`;
+    const stopKeyOf = s => s.key;
+    const SHUTTLE_RE = /shuttle|replacement bus|buses are (running|replacing)|bus(es)? replac/i;
+
+    function advisoryHtml(stop, disruptions) {
+      if (alertsOk === false) return `<div class="advisory info">Detour info is unavailable right now, so these times can't be checked against TTC service alerts.</div>`;
+      return disruptions.map(d => {
+        const a = d.alert, rt = escapeHtml(d.route);
+        const text = escapeHtml(a.headerText || a.title || '');
+        const dirNote = a.direction && !/both/i.test(a.direction) ? ` ${escapeHtml(a.direction.toLowerCase())}` : '';
+        if (!d.bypass) {
+          const cls = a.effect === 'SIGNIFICANT_DELAYS' ? 'delay' : 'info';
+          return `<div class="advisory ${cls}"><div class="head">${rt}: ${escapeHtml(a.effectDesc || 'Service alert')}${d.routeWide ? ' on this route' : ''}</div>${text}</div>`;
+        }
+        let html = `<div class="advisory"><div class="head">${rt}${dirNote} is not stopping here</div>${text}`;
+        const regular = nearestRegularStop(stop, d);
+        const detour = nearestDetourStop(stop, d);
+        if (detour && (!regular || detour.stop !== regular.stop) && (!regular || detour.m < regular.m * 1.5))
+          html += `<div class="alt">Closest stop on the detour path: ${stopLink(detour.stop)}, ${walk(detour.m)}.</div>`;
+        if (regular)
+          html += `<div class="alt">Nearest stop where ${rt} still stops normally: ${stopLink(regular.stop)}, ${walk(regular.m)}.</div>`;
+        if (a.shuttleType || SHUTTLE_RE.test(`${a.title} ${a.headerText} ${a.description}`))
+          html += `<div class="alt"><b>Replacement buses:</b> ${escapeHtml(a.shuttleType && !/^running$/i.test(a.shuttleType) ? a.shuttleType : 'the TTC says shuttle buses are running')}` +
+                  `${a.shuttleStart ? ' from ' + escapeHtml(a.shuttleStart) : ''}${a.shuttleEnd ? ' to ' + escapeHtml(a.shuttleEnd) : ''}.</div>`;
+        html += `<div class="src">Source: TTC service alerts</div></div>`;
+        return html;
+      }).join('');
+    }
+
+    // Tapping a suggested stop jumps to it and opens its popup.
+    document.addEventListener('click', e => {
+      const a = e.target.closest('a[data-goto]');
+      if (!a) return;
+      e.preventDefault();
+      const s = stops.get(a.dataset.goto);
+      if (!s) return;
+      if (!s.marker || !layer.hasLayer(s.marker)) { $('search').value = ''; $('routeFilter').value = ''; updateStatus(); }
+      map.setView([s.lat, s.lon], Math.max(map.getZoom(), 16));
+      s.marker?.openPopup();
+    });
+
     // ---- Next-vehicle predictions -------------------------------------------
     let arrivalsTimer = null, arrivalsSeq = 0;
 
@@ -163,7 +331,7 @@
       const seq = arrivalsSeq;
       const refresh = async () => {
         let html;
-        try { html = arrivalsHtml(await fetchPredictions(stop)); }
+        try { html = arrivalsHtml(await fetchPredictions(stop), stop); }
         catch (e) { html = `<div class="none">Couldn't load arrival times (${escapeHtml(e.message)}).</div>`; }
         if (seq !== arrivalsSeq) return;   // popup closed or another stop opened meanwhile
         const el = popupEl(stop).querySelector('.arrivals');
@@ -185,23 +353,31 @@
       return ok.flatMap(x => asArray(x.value.predictions));
     }
 
-    function arrivalsHtml(predictions) {
+    function arrivalsHtml(predictions, stop) {
+      const disruptions = stopDisruptions(stop);
+      const bypassed = (route, dirTitle) => disruptions.some(d => d.bypass && d.route === route && dirMatches(d.alert.direction, dirTitle));
       const rows = [];
       for (const p of predictions) {
         for (const d of asArray(p.direction)) {
-          const preds = asArray(d.prediction)
-            .map(x => +x.seconds).filter(n => n >= 0).sort((a, b) => a - b).slice(0, 3);
-          if (!preds.length) continue;
-          rows.push({ route: p.routeTag, dir: d.title, first: preds[0], preds });
+          const list = asArray(d.prediction).filter(x => +x.seconds >= 0).sort((a, b) => a.seconds - b.seconds).slice(0, 3);
+          if (!list.length) continue;
+          rows.push({
+            route: p.routeTag, dir: d.title, first: +list[0].seconds, preds: list.map(x => +x.seconds),
+            bypassed: bypassed(p.routeTag, d.title),
+            // Streetcar routes run buses on "...Bus" branches when streetcars are replaced.
+            shuttle: isStreetcar(p.routeTag) && list.some(x => /bus/i.test(x.dirTag || '')),
+          });
         }
       }
-      rows.sort((a, b) => a.first - b.first);
+      rows.sort((a, b) => a.bypassed - b.bypassed || a.first - b.first);
+      const advisory = advisoryHtml(stop, disruptions);
       const fmt = sec => sec < 60 ? 'Due' : Math.floor(sec / 60) + ' min';
       const now = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-      if (!rows.length) return `<div class="none">No vehicles predicted right now.</div><div class="updated">Checked ${now}</div>`;
-      return rows.map(r => `<div class="row">
-          <span class="chip" style="background:${isStreetcar(r.route) ? COLORS.streetcar : COLORS.bus}">${escapeHtml(r.route)}</span>
-          <div><div class="times">${r.preds.map(fmt).join(', ')}</div><div class="dir">${escapeHtml(r.dir)}</div></div>
+      if (!rows.length) return advisory + `<div class="none">No vehicles predicted right now.</div><div class="updated">Checked ${now}</div>`;
+      return advisory + rows.map(r => `<div class="row${r.bypassed ? ' bypassed' : ''}">
+          <span class="chip" style="background:${isStreetcar(r.route) && !r.shuttle ? COLORS.streetcar : COLORS.bus}">${escapeHtml(r.route)}</span>
+          <div><div class="times">${r.preds.map(fmt).join(', ')}</div>${r.bypassed ? '<span class="flag">Detoured: won\'t stop here</span>' : ''}${r.shuttle ? '<span class="shuttle">BUS</span>' : ''}
+          <div class="dir">${escapeHtml(r.dir)}</div></div>
         </div>`).join('') + `<div class="updated">Live · updated ${now} · refreshes every 30s</div>`;
     }
 
@@ -215,15 +391,16 @@
       const q = $('search').value.trim().toLowerCase();
       layer.clearLayers();
       let shown = 0;
-      for (const stop of stops.values()) {
+      for (const [key, stop] of stops) {
         if (routeTag && !stop.routes.has(routeTag)) continue;
         if (q && !stop.title.toLowerCase().includes(q) && !(stop.stopId || '').includes(q)) continue;
         // Only count route types the user has switched on.
         const visibleRoutes = [...stop.routes.keys()].filter(t => isStreetcar(t) ? showCar : showBus);
         if (!visibleRoutes.length) continue;
         const kind = stopKind(stop, visibleRoutes);
-        L.circleMarker([stop.lat, stop.lon], {
-          renderer, radius: 4, weight: 1, color: '#fff', fillColor: COLORS[kind], fillOpacity: 0.9
+        const hit = affectedKeys.has(key);
+        stop.marker = L.circleMarker([stop.lat, stop.lon], {
+          renderer, radius: hit ? 5 : 4, weight: hit ? 3 : 1, color: hit ? '#f08c00' : '#fff', fillColor: COLORS[kind], fillOpacity: 0.9
         }).bindPopup(() => popupEl(stop), popupOptions())
           .on('popupopen', e => startArrivals(stop, e.popup))
           .on('popupclose', stopArrivals)
@@ -277,6 +454,7 @@
       updateStatus(done, routes.length);
       if (failed.length) $('status').textContent += ` · failed: ${failed.join(', ')}`;
       $('bar').style.display = 'none';
+      await loadAlerts();
     }
 
     ['showBus', 'showStreetcar', 'routeFilter'].forEach(id => $(id).addEventListener('change', () => updateStatus()));
@@ -291,6 +469,7 @@
     });
 
     load();
+    setInterval(loadAlerts, 2 * 60 * 1000);
   </script>
 </body>
 </html>
