@@ -144,7 +144,9 @@ async function pollPositions(panel, now) {
       const { d, t: frac } = segDist([s.lat, s.lon], prev.p, p);
       if (d <= 60) { const nk = s.id + '|' + id, nl = nearby.get(nk) || []; nl.push(prev.t + frac * (t - prev.t)); nearby.set(nk, nl); }
       if (d > PASS_M) continue;
-      if (head != null && angDiff(head, s.heading) > 60) continue;     // other side of the street
+      // Heading must match the stop's direction (other side of the street). A vehicle standing
+      // still has no heading: only count it if it's right at the stop.
+      if (head == null ? d > 15 : angDiff(head, s.heading) > 60) continue;
       const at = prev.t + frac * (t - prev.t);
       const k = s.id + '|' + id;
       const list = passes.get(k) || [];
