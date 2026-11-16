@@ -188,17 +188,28 @@
       })));
     }
 
+    // Streetcar routes also run replacement buses on their own branches ("506b ... Replacement
+    // Bus"), which can stop where streetcars don't. Judge each stop by the branches serving it.
+    const modeOf = (route, dir) => isStreetcar(route) && !/\bbus\b/i.test(dir.title) ? 'streetcar' : 'bus';
+    function isStreetcarAt(stop, route) {
+      if (!isStreetcar(route)) return false;
+      const modes = new Set((routeDirs.get(route) || []).filter(d => d.keys.includes(stop.key)).map(d => modeOf(route, d)));
+      return !modes.size || modes.has('streetcar');
+    }
+
     function stopKind(stop, routeSet) {
       let bus = false, car = false;
-      for (const tag of routeSet) (isStreetcar(tag) ? (car = true) : (bus = true));
+      for (const tag of routeSet) (isStreetcarAt(stop, tag) ? (car = true) : (bus = true));
       return bus && car ? 'both' : car ? 'streetcar' : 'bus';
     }
 
     function popupHtml(stop) {
       const tags = [...stop.routes.keys()].sort((a, b) => parseInt(a) - parseInt(b));
-      const chips = tags.map(t =>
-        `<button type="button" class="chip" data-route="${escapeHtml(t)}" style="background:${isStreetcar(t) ? COLORS.streetcar : COLORS.bus}" title="Show ${escapeHtml(stop.routes.get(t))} on the map">${t}</button>`
-      ).join('');
+      const chips = tags.map(t => {
+        const car = isStreetcarAt(stop, t), busOnly = isStreetcar(t) && !car;
+        return `<button type="button" class="chip" data-route="${escapeHtml(t)}" style="background:${car ? COLORS.streetcar : COLORS.bus}" ` +
+          `title="${busOnly ? 'Only the replacement bus stops here. ' : ''}Show ${escapeHtml(stop.routes.get(t))} on the map">${t}${busOnly ? ' bus' : ''}</button>`;
+      }).join('');
       return `<div class="popup"><h3>${escapeHtml(stop.title)}</h3>
         <div class="meta">${stop.stopId ? 'Stop #' + stop.stopId : 'No stop number'}${cornerOf(stop) ? ' · ' + escapeHtml(cornerOf(stop, true)) : ''} · ${tags.length} route${tags.length === 1 ? '' : 's'}</div>
         ${chips}<div class="hint">Tap a route to see it on the map</div>
@@ -481,11 +492,17 @@
         const dirs = routeDirs.get(route) || [];
         // A route's first or last stop has no opposite direction by nature.
         if (dirs.some(d => d.keys[0] === stop.key || d.keys[d.keys.length - 1] === stop.key)) continue;
-        const here = new Set(dirs.filter(d => d.keys.includes(stop.key)).map(d => dirWord(d.title)));
-        for (const w of new Set(dirs.map(d => dirWord(d.title)).filter(Boolean))) {
-          if (here.has(w)) continue;
+        // Direction and mode together: an eastbound replacement bus stopping here doesn't mean
+        // the eastbound streetcar does.
+        const wm = d => dirWord(d.title) && dirWord(d.title) + '|' + modeOf(route, d);
+        const served = dirs.filter(d => d.keys.includes(stop.key));
+        const here = new Set(served.map(wm)), hereWords = new Set(served.map(d => dirWord(d.title)));
+        const found = [];
+        for (const key of new Set(dirs.map(wm).filter(Boolean))) {
+          if (here.has(key)) continue;
+          const [w, mode] = key.split('|');
           const opts = [];
-          for (const d of dirs.filter(d => dirWord(d.title) === w)) {
+          for (const d of dirs.filter(d => wm(d) === key)) {
             let best = null;
             for (const k of d.keys) {
               const s = stops.get(k);
@@ -495,9 +512,19 @@
             }
             if (best) opts.push({ dir: d, ...best });
           }
-          if (!opts.length || opts.some(o => o.m <= NEARBY_M)) continue;   // boards across the street: normal
-          const near = opts.filter(o => o.m <= ALT_MAX_M).sort((a, b) => a.m - b.m);
-          if (near.length) out.push({ route, word: w, opts: near });
+          if (!opts.length) continue;
+          const nearby = opts.some(o => o.m <= NEARBY_M);                   // boards across the street: normal
+          found.push({ route, word: w, mode, nearby, partial: hereWords.has(w),
+                       opts: opts.filter(o => o.m <= ALT_MAX_M).sort((a, b) => a.m - b.m) });
+        }
+        // A streetcar going that way here or across the street covers it; a replacement bus on
+        // another street isn't news.
+        const carCovers = w => hereWords.has(w) && here.has(w + '|streetcar') ||
+          found.some(f => f.word === w && f.mode === 'streetcar' && f.nearby);
+        for (const f of found) {
+          if (f.nearby || !f.opts.length) continue;
+          if (f.mode === 'bus' && carCovers(f.word)) continue;
+          out.push(f);
         }
       }
       return out;
@@ -505,9 +532,15 @@
 
     function boardingHtml(stop) {
       // Routes sharing the same alternatives (e.g. 306 and 506) get one box.
-      const groups = new Map();
+      const merged = new Map();
       for (const x of missingDirections(stop)) {
-        const sig = x.word + '|' + x.opts.map(o => o.stop.key + (/bus/i.test(o.dir.title) ? 'b' : 's')).join(',');
+        const k = x.route + '|' + x.word + '|' + x.partial;
+        if (!merged.has(k)) merged.set(k, { ...x, opts: [...x.opts] });
+        else { const m = merged.get(k); m.mode = m.mode === x.mode ? m.mode : 'any'; m.opts.push(...x.opts); m.opts.sort((a, b) => a.m - b.m); }
+      }
+      const groups = new Map();
+      for (const x of merged.values()) {
+        const sig = x.word + '|' + x.mode + '|' + x.partial + '|' + x.opts.map(o => o.stop.key).join(',');
         if (!groups.has(sig)) groups.set(sig, { ...x, routes: [] });
         groups.get(sig).routes.push(x.route);
       }
@@ -515,11 +548,13 @@
         const items = x.opts.map(o => {
           // "West - 506 Carlton towards High Park" -> "Carlton towards High Park" (shared by 306/506).
           const name = o.dir.title.replace(/^\w+\s*-\s*/, '').replace(/^\d+[a-z]?\s+/i, '');
-          const kind = isStreetcar(x.route) ? (/bus/i.test(o.dir.title) ? ' (bus)' : ' (streetcar)') : '';
+          const kind = isStreetcar(x.route) ? (modeOf(x.route, o.dir) === 'bus' ? ' (bus)' : ' (streetcar)') : '';
           return `<li><b>${escapeHtml(name)}${kind}</b>: ${stopLink(o.stop)}, ${walk(o.m)}</li>`;
         }).join('');
-        return `<div class="advisory board"><div class="head">${DIR_NAME[x.word]} ${escapeHtml(x.routes.join(' / '))} doesn't stop at this corner right now</div>` +
-          `Board ${DIR_NAME[x.word].toLowerCase()} at:<ul>${items}</ul></div>`;
+        const what = isStreetcar(x.route) && x.mode !== 'any' ? (x.mode === 'streetcar' ? ' streetcar' : ' replacement bus') : '';
+        const other = !x.partial ? '' : x.mode === 'streetcar' ? 'Only the replacement bus stops here going this way. ' : 'Only the streetcar stops here going this way. ';
+        return `<div class="advisory board"><div class="head">${DIR_NAME[x.word]} ${escapeHtml(x.routes.join(' / '))}${what} doesn't stop at this corner right now</div>` +
+          `${other}Board ${what ? 'the ' + DIR_NAME[x.word].toLowerCase() + what : DIR_NAME[x.word].toLowerCase()} at:<ul>${items}</ul></div>`;
       }).join('');
     }
 
@@ -872,7 +907,7 @@
         if (routeTag && !stop.routes.has(routeTag)) continue;
         if (q && !stop.title.toLowerCase().includes(q) && !(stop.stopId || '').includes(q)) continue;
         // Only count route types the user has switched on.
-        const visibleRoutes = [...stop.routes.keys()].filter(t => isStreetcar(t) ? showCar : showBus);
+        const visibleRoutes = [...stop.routes.keys()].filter(t => isStreetcarAt(stop, t) ? showCar : showBus);
         if (!visibleRoutes.length) continue;
         const kind = stopKind(stop, visibleRoutes);
         const hit = affectedKeys.has(key);
