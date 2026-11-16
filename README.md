@@ -79,6 +79,17 @@ demand: Actions → OpenStreetMap snapshot → Run workflow) and commits them to
 server reads those files and only queries Overpass live if they're missing or older than
 30 days. OSM data © OpenStreetMap contributors, ODbL.
 
+## Ghost tracker
+
+`scripts/ghost-tracker.js` watches ~380 stops on 29 busy routes and scores arrival predictions
+from both TTC feeds (NextBus/Umo IQ, which this app shows, and GTFS-realtime, which Google and
+Transit appear to use) against where vehicles actually went, from TTC vehicle positions:
+a prediction is a **ghost** when the predicted vehicle never passed the stop (or the trip had no
+vehicle and none came). It also measures how early or late served predictions were, by how far
+ahead they were made. The `Ghost tracker` GitHub Actions workflow runs it for 50 minutes every
+hour (on public repositories) and commits results to the `ghost-data` branch. Summarize with
+`node scripts/ghost-report.js runs/` in a checkout of that branch.
+
 ## Feed-disagreement observer
 
 The TTC's sources don't always agree: an alert may say stops are skipped while the live feed

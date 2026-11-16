@@ -1,0 +1,56 @@
+name: Ghost tracker
+
+# Watches a panel of stops for ~50 minutes every hour and scores both TTC feeds' arrival
+# predictions against where vehicles actually went (scripts/ghost-tracker.js). Results are
+# committed to the `ghost-data` branch (not the branch the site deploys from, so the site
+# isn't redeployed every hour). Scheduled workflows are unlimited on public repositories.
+on:
+  schedule:
+    - cron: '3 * * * *'
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: 'How long to watch (minutes)'
+        default: '50'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ghost-tracker
+  cancel-in-progress: false
+
+jobs:
+  track:
+    # Hourly runs only on a public repo (unlimited Actions time); private repos have a monthly
+    # allowance this would use up in about a day and a half. Manual runs always work.
+    if: github.event_name == 'workflow_dispatch' || github.event.repository.private == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Watch and score
+        run: |
+          STAMP=$(TZ=America/Toronto date +%Y-%m-%d/%H%M)
+          echo "STAMP=$STAMP" >> "$GITHUB_ENV"
+          node scripts/ghost-tracker.js "${{ github.event.inputs.minutes || '50' }}" "out/$STAMP.json"
+      - name: Save to ghost-data branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin ghost-data >/dev/null; then
+            git fetch --depth 1 origin ghost-data
+            git worktree add data-branch FETCH_HEAD
+          else
+            git worktree add --detach data-branch
+            (cd data-branch && git checkout --orphan ghost-data && git rm -rq . && echo "Ghost tracker results. See scripts/ghost-tracker.js on the main branch." > README.md)
+          fi
+          mkdir -p "data-branch/runs/$(dirname "$STAMP")"
+          cp "out/$STAMP.json" "data-branch/runs/$STAMP.json"
+          cd data-branch
+          git add -A
+          git commit -q -m "Ghost tracker run $STAMP"
+          for i in 1 2 3; do git push origin HEAD:ghost-data && break; git pull --rebase origin ghost-data; done
