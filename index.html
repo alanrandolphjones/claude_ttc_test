@@ -108,7 +108,7 @@
     <div id="panelBody">
     <label><input type="checkbox" id="showBus" checked> <span class="dot" style="background:var(--bus)"></span> Bus</label>
     <label><input type="checkbox" id="showStreetcar" checked> <span class="dot" style="background:var(--streetcar)"></span> Streetcar</label>
-    <label style="color:var(--muted)"><span class="dot" style="background:var(--both)"></span> Served by both</label>
+    <label style="color:var(--muted)"><span class="dot" style="background:linear-gradient(90deg, var(--bus) 50%, var(--streetcar) 50%)"></span> Bus and streetcar</label>
     <label style="color:var(--muted)"><span class="dot" style="background:#fff;box-shadow:0 0 0 2.5px var(--alert)"></span> Detour / no service</label>
     <label><input type="checkbox" id="showDetours" checked> <span class="dash"></span> Detour paths (TTC)</label>
     <label style="color:var(--muted)"><span class="dot" style="background:#9a9aa0"></span> Stop not in service</label>
@@ -139,7 +139,29 @@
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors · Stop data &copy; Toronto Transit Commission'
     }).addTo(map);
 
-    const renderer = L.canvas({ padding: 0.5, tolerance: 6 });   // one canvas for everything, so taps reach every layer
+    const renderer = L.canvas({ padding: 0.5, tolerance: 6 });
+
+    // A stop marker filled half and half: options.fillColor on the left, options.fillColor2 on
+    // the right. Leaflet draws the full circle (fill, outline, tap area); we paint the right half over it.
+    const SplitMarker = L.CircleMarker.extend({
+      _updatePath() {
+        L.CircleMarker.prototype._updatePath.call(this);
+        const r = this._renderer;
+        if (!r._drawing || this._empty() || !r._ctx) return;
+        const ctx = r._ctx, p = this._point, rad = Math.max(Math.round(this._radius), 1) - (this.options.weight || 0) / 2;
+        if (rad <= 0) return;
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(p.x, p.y);
+        ctx.arc(p.x, p.y, rad, -Math.PI / 2, Math.PI / 2, false);
+        ctx.closePath();
+        ctx.globalAlpha = this.options.fillOpacity ?? 1;
+        ctx.fillStyle = this.options.fillColor2;
+        ctx.fill();
+        ctx.restore();
+      },
+    });
+    const splitMarker = (ll, opts) => new SplitMarker(ll, opts);   // one canvas for everything, so taps reach every layer
     const networkLayer = L.layerGroup().addTo(map);  // every route, faint
     const highlightLayer = L.layerGroup().addTo(map); // the route the viewer tapped
     const detourLayer = L.layerGroup().addTo(map);   // added first so stops draw on top
@@ -1082,8 +1104,10 @@
         const kind = routeTag ? (splitRoute(routeTag).bus || !isStreetcar(routeTag) ? 'bus' : 'streetcar') : stopKind(stop, visibleRoutes);
         const hit = affectedKeys.has(key);
         stop.hit = hit;
-        stop.marker = L.circleMarker([stop.lat, stop.lon], {
-          renderer, radius: stopRadius(map.getZoom(), hit), weight: stopWeight(map.getZoom(), hit), color: hit ? '#f08c00' : '#fff', fillColor: COLORS[kind], fillOpacity: 0.9
+        // Bus and streetcar at one stop: half red, half green instead of a third colour.
+        stop.marker = (kind === 'both' ? splitMarker : L.circleMarker)([stop.lat, stop.lon], {
+          renderer, radius: stopRadius(map.getZoom(), hit), weight: stopWeight(map.getZoom(), hit), color: hit ? '#f08c00' : '#fff',
+          fillColor: kind === 'both' ? COLORS.bus : COLORS[kind], fillColor2: COLORS.streetcar, fillOpacity: 0.9
         }).bindPopup(() => popupEl(stop), popupOptions())
           .on('popupopen', e => startArrivals(stop, e.popup))
           .on('popupclose', stopArrivals)
