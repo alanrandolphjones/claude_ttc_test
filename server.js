@@ -15,7 +15,7 @@ const path = require('node:path');
 const { getAlerts, staleAlerts } = require('./lib/alerts');
 const { getDetours } = require('./lib/detours');
 const observer = require('./lib/observer');
-const { getCandidates } = require('./lib/osm');
+const { getCandidates, osmStatus } = require('./lib/osm');
 const { getNetwork, getRoute } = require('./lib/routes');
 const zlib = require('node:zlib');
 
@@ -35,7 +35,7 @@ function send(res, status, body, type = 'application/json', extra = {}) {
 }
 
 const API = {
-  '/healthz': async () => JSON.stringify({ ok: true, observer: observer.status() }),
+  '/healthz': async () => JSON.stringify({ ok: true, observer: observer.status(), openstreetmap: osmStatus() }),
   '/api/alerts': async () => getAlerts(),
   '/api/detours': async () => JSON.stringify(await getDetours()),
   '/api/osm-stops': async () => JSON.stringify(await getCandidates()),
