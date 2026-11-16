@@ -203,6 +203,25 @@
       return branchCodes(routes, title) + mode + (towards ? ' towards ' + towards : '');
     }
 
+    // A streetcar route's replacement-bus branch is shown as a route of its own ("506B"): its own
+    // entry in the route list, its own highlight, its own stops. The data stays one TTC route.
+    const busBranchDirs = r => isStreetcar(r) ? (routeDirs.get(r) || []).filter(d => modeOf(r, d) === 'bus') : [];
+    const busBranches = r => [...new Set(busBranchDirs(r).map(d => branchLetter(d.title)).filter(Boolean))].map(l => r + l);
+    function splitRoute(tag) {
+      const m = /^(\d+)([A-Z])$/.exec(tag || '');
+      if (m && busBranches(m[1]).includes(tag)) return { base: m[1], bus: true, letter: m[2] };
+      return { base: tag, bus: false, letter: '' };
+    }
+    // Is this stop served by that route as shown on the map (506 = the streetcar, 506B = the bus)?
+    function stopOnRoute(stop, tag) {
+      const { base, bus, letter } = splitRoute(tag);
+      if (!stop.routes.has(base)) return false;
+      if (!isStreetcar(base)) return true;
+      const dirs = (routeDirs.get(base) || []).filter(d => d.keys.includes(stop.key));
+      if (!dirs.length) return !bus;
+      return dirs.some(d => bus ? modeOf(base, d) === 'bus' && branchLetter(d.title) === letter : modeOf(base, d) === 'streetcar');
+    }
+
     function isStreetcarAt(stop, route) {
       if (!isStreetcar(route)) return false;
       const modes = new Set((routeDirs.get(route) || []).filter(d => d.keys.includes(stop.key)).map(d => modeOf(route, d)));
@@ -228,7 +247,7 @@
         // Streetcar not stopping here right now (only its replacement bus): show it greyed out.
         if (isStreetcar(t) && ![...branches.values()].includes('streetcar')) branches.set(t, 'off');
         return [...branches].sort().map(([code, mode]) =>
-          `<button type="button" class="chip${mode === 'off' ? ' off' : ''}" data-route="${escapeHtml(t)}" style="background:${mode === 'off' ? '#b5b5ba' : mode === 'streetcar' ? COLORS.streetcar : COLORS.bus}" ` +
+          `<button type="button" class="chip${mode === 'off' ? ' off' : ''}" data-route="${escapeHtml(mode === 'bus' && isStreetcar(t) ? code : t)}" style="background:${mode === 'off' ? '#b5b5ba' : mode === 'streetcar' ? COLORS.streetcar : COLORS.bus}" ` +
           `title="${mode === 'off' ? code + ' streetcar isn\'t stopping here right now. ' : mode === 'bus' && isStreetcar(t) ? 'Replacement bus. ' : ''}Show ${escapeHtml(stop.routes.get(t))} on the map">${escapeHtml(code)}</button>`);
       }).join('');
       return `<div class="popup"><h3>${escapeHtml(stop.title)}</h3>
@@ -607,7 +626,7 @@
       if (!$('showDetours').checked) return;
       const routeTag = $('routeFilter').value, today = torontoYmd();
       for (const d of detours) {
-        if (routeTag && d.route !== routeTag) continue;
+        if (routeTag && d.route !== splitRoute(routeTag).base) continue;
         const running = d.serviceDates.includes(today);
         const dates = d.serviceDates.length ? `${ymdText(d.serviceDates[0])} to ${ymdText(d.serviceDates[d.serviceDates.length - 1])}` : '';
         L.polyline(d.path, { renderer, color: running ? '#f08c00' : '#8a6fc0', weight: 5, opacity: 0.9, dashArray: '10 7', lineCap: 'round' })
@@ -709,10 +728,10 @@
           if (L.LineUtil.pointToSegmentDistance(p, pts[i - 1], pts[i]) <= 10) { found.add(l.route); break; }
         }
       }
-      const list = [...found].sort((a, b) => parseInt(a) - parseInt(b));
+      const list = [...found].flatMap(r => [r, ...busBranches(r)]).sort((a, b) => parseInt(a) - parseInt(b) || a.localeCompare(b));
       if (list.length === 1) return highlightRoute(list[0]);
-      const chips = list.map(r => `<button type="button" class="chip" data-route="${escapeHtml(r)}" style="background:${routeColor(r)}">${escapeHtml(r)}</button>` +
-        ` <span class="meta">${escapeHtml((routeTitles.get(r) || '').replace(/^\d+-/, ''))}</span>`).join('<br>');
+      const chips = list.map(r => { const sp = splitRoute(r); return `<button type="button" class="chip" data-route="${escapeHtml(r)}" style="background:${sp.bus ? COLORS.bus : routeColor(r)}">${escapeHtml(r)}</button>` +
+        ` <span class="meta">${escapeHtml((routeTitles.get(sp.base) || '').replace(/^\d+-/, ''))}${sp.bus ? ' replacement bus' : isStreetcar(r) ? ' streetcar' : ''}</span>`; }).join('<br>');
       L.popup({ maxWidth: 260 }).setLatLng(latlng)
         .setContent(`<div class="popup"><h3>Routes on this street</h3><div class="hint">Tap one to see it on the map</div><div style="margin-top:6px;line-height:2">${chips}</div></div>`)
         .openOn(map);
@@ -724,22 +743,24 @@
       if ($('routeFilter').value !== r) $('routeFilter').value = r;
       updateStatus(); drawDetours(); drawGhosts();
       networkLines.forEach(l => l.setStyle(netStyle(l.route, map.getZoom(), true)));
-      const title = routeTitles.get(r) || r;
+      const { base, bus } = splitRoute(r);
+      const title = routeTitles.get(base) || base;
+      const color = bus ? COLORS.bus : routeColor(base);
       $('rcChip').textContent = r;
-      $('rcChip').style.background = routeColor(r);
-      $('rcTitle').textContent = isStreetcar(r) ? 'streetcar' + ((routeDirs.get(r) || []).some(d => modeOf(r, d) === 'bus') ? ' and replacement bus' : '') : title.replace(/^\d+-/, '');
+      $('rcChip').style.background = color;
+      $('rcTitle').textContent = bus ? 'replacement bus' : isStreetcar(base) ? 'streetcar' : title.replace(/^\d+-/, '');
       $('rcLegend').innerHTML = '<div class="note">Loading route…</div>';
       $('routeCard').hidden = false;
 
       let data = null;
       try {
-        const res = await fetch('api/route?r=' + encodeURIComponent(r));
+        const res = await fetch('api/route?r=' + encodeURIComponent(base));
         if (!res.ok) throw new Error('HTTP ' + res.status);
         data = await res.json();
       } catch {
         // No server (static hosting): draw the live path straight from the TTC feed, without comparisons.
         try {
-          const cfg = (await getJSON(`command=routeConfig&r=${encodeURIComponent(r)}`)).route;
+          const cfg = (await getJSON(`command=routeConfig&r=${encodeURIComponent(base)}`)).route;
           data = { live: null, liveRaw: asArray(cfg.path).map(p => asArray(p.point).map(x => [+x.lat, +x.lon])), changed: [], notServed: [], replacementBus: [], notServedBusCovers: [], normalSource: null };
         } catch { data = null; }
       }
@@ -748,33 +769,38 @@
       highlightLines = [];
       if (!data) { $('rcLegend').innerHTML = '<div class="note">Couldn\'t load this route\'s path.</div>'; return; }
 
-      const live = data.liveRaw || data.live.map(decodeLine);
-      const changed = data.changed.map(decodeLine), notServed = data.notServed.map(decodeLine);
       const repBus = (data.replacementBus || []).map(decodeLine), busCovers = (data.notServedBusCovers || []).map(decodeLine);
+      const live = bus ? repBus : (data.liveRaw || data.live.map(decodeLine));
+      const changed = bus ? [] : data.changed.map(decodeLine), notServed = bus ? [] : data.notServed.map(decodeLine);
       const add = (pts, style) => { const l = L.polyline(pts, { renderer, interactive: false, lineCap: 'round', lineJoin: 'round', ...style }); highlightLines.push(l.addTo(highlightLayer)); };
       for (const pts of [...notServed, ...busCovers]) add(pts, { color: '#6b6b70', weight: 5, opacity: 0.9, dashArray: '2 9' });
-      for (const pts of repBus) add(pts, { color: '#ffffff', weight: 8, opacity: 0.95 });
-      for (const pts of repBus) add(pts, { color: COLORS.bus, weight: 4, opacity: 1, dashArray: '9 6' });
       for (const pts of live) add(pts, { color: '#ffffff', weight: 10, opacity: 0.95 });          // casing
-      for (const pts of live) add(pts, { color: routeColor(r), weight: 6, opacity: 1 });
+      for (const pts of live) add(pts, { color, weight: 6, opacity: 1 });
       for (const pts of changed) add(pts, { color: '#f08c00', weight: 6, opacity: 1 });
       restack();
 
-      const hasDetour = detours.some(d => d.route === r);
-      const hasAlert = alerts.some(a => a.route === r && !a.upcoming);
+      const hasDetour = !bus && detours.some(d => d.route === base);
+      const hasAlert = alerts.some(a => a.route === base && !a.upcoming);
       const item = (style, text) => `<div class="it"><span class="sw" style="${style}"></span>${text}</div>`;
-      const mode = data.streetcar ? 'streetcar' : 'route';
-      let legend = item(`border-top-color:${routeColor(r)}`, data.streetcar ? 'Where the streetcar runs now (TTC live data)' : 'Where it runs now (TTC live data)');
-      const busCodes = [...new Set((routeDirs.get(r) || []).filter(d => modeOf(r, d) === 'bus').map(d => branchCode(r, d.title)))].join(', ');
-      if (repBus.length) legend += item(`border-top-color:${COLORS.bus};border-top-style:dashed`, `Replacement bus${busCodes ? ' (' + escapeHtml(busCodes) + ')' : ''}`);
-      if (changed.length) legend += item('border-top-color:#f08c00', data.streetcar ? 'Streetcar off its regular route' : 'Off its regular route');
-      if (notServed.length) legend += item('border-top-color:#6b6b70;border-top-style:dotted', data.streetcar ? 'Regular route with no streetcar or bus right now' : 'Regular route, not served right now');
-      if (busCovers.length) legend += item('border-top-color:#6b6b70;border-top-style:dotted', 'Regular route with no streetcar; the replacement bus covers it');
-      if (hasDetour) legend += item('border-top-color:#f08c00;border-top-style:dashed', 'TTC detour path');
-      const src = { openstreetmap: 'OpenStreetMap', schedule: 'the TTC schedule', 'schedule+openstreetmap': 'the TTC schedule and OpenStreetMap' }[data.normalSource] || null;
-      if (src && !changed.length && !notServed.length && !busCovers.length)
-        legend += `<div class="note">Same as its regular route (from ${src}).${hasAlert ? ' The TTC does report a service change on this route: tap a stop for details.' : ''}</div>`;
-      else if (src) legend += `<div class="note">Regular route from ${src}.</div>`;
+      const linkTo = code => `<button type="button" class="chip" data-route="${escapeHtml(code)}" style="background:${splitRoute(code).bus ? COLORS.bus : routeColor(base)}">${escapeHtml(code)}</button>`;
+      let legend;
+      if (bus) {
+        legend = item(`border-top-color:${COLORS.bus}`, `Where the ${escapeHtml(r)} replacement bus runs (TTC live data)`);
+        if (busCovers.length) legend += item('border-top-color:#6b6b70;border-top-style:dotted', `Regular ${escapeHtml(base)} streetcar route it stands in for`);
+        legend += `<div class="note">The ${escapeHtml(r)} is a bus that replaces the ${escapeHtml(base)} streetcar on part of its route. ${linkTo(base)} streetcar</div>`;
+      } else {
+        const codes = busBranches(base);
+        legend = item(`border-top-color:${color}`, data.streetcar ? `Where the ${escapeHtml(base)} streetcar runs now (TTC live data)` : 'Where it runs now (TTC live data)');
+        if (changed.length) legend += item('border-top-color:#f08c00', data.streetcar ? 'Streetcar off its regular route' : 'Off its regular route');
+        if (notServed.length) legend += item('border-top-color:#6b6b70;border-top-style:dotted', data.streetcar ? 'Regular route with no streetcar or bus right now' : 'Regular route, not served right now');
+        if (busCovers.length) legend += item('border-top-color:#6b6b70;border-top-style:dotted', `Regular route with no streetcar; ${codes.length ? 'the ' + escapeHtml(codes.join(' / ')) + ' replacement bus covers it' : 'a replacement bus covers it'}`);
+        if (hasDetour) legend += item('border-top-color:#f08c00;border-top-style:dashed', 'TTC detour path');
+        const src = { openstreetmap: 'OpenStreetMap', schedule: 'the TTC schedule', 'schedule+openstreetmap': 'the TTC schedule and OpenStreetMap' }[data.normalSource] || null;
+        if (src && !changed.length && !notServed.length && !busCovers.length)
+          legend += `<div class="note">Same as its regular route (from ${src}).${hasAlert ? ' The TTC does report a service change on this route: tap a stop for details.' : ''}</div>`;
+        else if (src) legend += `<div class="note">Regular route from ${src}.</div>`;
+        if (codes.length) legend += `<div class="note">A replacement bus also runs: ${codes.map(linkTo).join(' ')}</div>`;
+      }
       $('rcLegend').innerHTML = legend;
 
       if (!opts.keepView && live.length) {
@@ -857,7 +883,7 @@
       ghostLayer.clearLayers();
       const routeTag = $('routeFilter').value, z = map.getZoom();
       for (const g of ghosts) {
-        if (routeTag && !g.routes.has(routeTag)) continue;
+        if (routeTag && !g.routes.has(splitRoute(routeTag).base)) continue;
         g.marker = L.circleMarker([g.lat, g.lon], {
           renderer, radius: stopRadius(z, false), weight: stopWeight(z, false), color: '#fff', fillColor: '#9a9aa0', fillOpacity: 0.95,
         }).bindPopup(() => ghostPopupHtml(g), popupOptions()).addTo(ghostLayer);
@@ -957,12 +983,13 @@
       layer.clearLayers();
       let shown = 0;
       for (const [key, stop] of stops) {
-        if (routeTag && !stop.routes.has(routeTag)) continue;
+        if (routeTag && !stopOnRoute(stop, routeTag)) continue;
         if (q && !stop.title.toLowerCase().includes(q) && !(stop.stopId || '').includes(q)) continue;
         // Only count route types the user has switched on.
         const visibleRoutes = [...stop.routes.keys()].filter(t => isStreetcarAt(stop, t) ? showCar : showBus);
         if (!visibleRoutes.length) continue;
-        const kind = stopKind(stop, visibleRoutes);
+        // With one route picked, colour its stops by that route (506B = bus, 506 = streetcar).
+        const kind = routeTag ? (splitRoute(routeTag).bus || !isStreetcar(routeTag) ? 'bus' : 'streetcar') : stopKind(stop, visibleRoutes);
         const hit = affectedKeys.has(key);
         stop.hit = hit;
         stop.marker = L.circleMarker([stop.lat, stop.lon], {
@@ -1025,7 +1052,10 @@
       const sel = $('routeFilter');
       [...routeTitles.entries()]
         .sort((a, b) => parseInt(a[0]) - parseInt(b[0]))
-        .forEach(([tag, title]) => sel.add(new Option(`${title}${isStreetcar(tag) ? ' (streetcar)' : ''}`, tag)));
+        .forEach(([tag, title]) => {
+          sel.add(new Option(`${title}${isStreetcar(tag) ? ' (streetcar)' : ''}`, tag));
+          for (const code of busBranches(tag)) sel.add(new Option(`${code}-${title.replace(/^\d+-/, '')} (replacement bus)`, code));
+        });
 
       updateStatus(done, routes.length);
       if (failed.length) $('status').textContent += ` · failed: ${failed.join(', ')}`;
