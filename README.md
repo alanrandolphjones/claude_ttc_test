@@ -51,6 +51,15 @@ A single-page map of every TTC bus and streetcar stop.
   list in `index.html` (`STREETCAR_ROUTES`) is taken from the TTC's GTFS schedule data
   (Toronto Open Data, `routes.txt` where `route_type = 0`).
 
+## OpenStreetMap snapshot
+
+Out-of-service stops and the regular-route comparison use OpenStreetMap data. Public
+Overpass servers often refuse or time out from cloud hosts, so a GitHub Actions workflow
+(`.github/workflows/osm-snapshot.yml`) fetches TTC stops and route relations weekly (or on
+demand: Actions → OpenStreetMap snapshot → Run workflow) and commits them to `osm/`. The
+server reads those files and only queries Overpass live if they're missing or older than
+30 days. OSM data © OpenStreetMap contributors, ODbL.
+
 ## Feed-disagreement observer
 
 The TTC's sources don't always agree: an alert may say stops are skipped while the live feed

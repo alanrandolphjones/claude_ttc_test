@@ -1,0 +1,30 @@
+name: OpenStreetMap snapshot
+
+# Refreshes osm/ (TTC stops and regular routes from OpenStreetMap) weekly, or on demand.
+# The server reads these files because public Overpass servers often refuse cloud hosts.
+on:
+  schedule:
+    - cron: '17 9 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node scripts/osm-snapshot.js
+      - name: Commit if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add osm/
+          if git diff --cached --quiet; then echo "No changes"; exit 0; fi
+          git commit -m "Update OpenStreetMap snapshot"
+          git push
