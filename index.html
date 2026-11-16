@@ -395,6 +395,49 @@
       return best;
     }
 
+    // The TTC's detour path for this route (trip modifications feed): the stop nearest the
+    // tapped one where vehicles travel the same way as the detour, so a southbound stop is never
+    // offered for a bus detouring north.
+    function segMetres(p, a, b) {
+      const ax = (a.lon - p.lon) * M_LON, ay = (a.lat - p.lat) * M_LAT, bx = (b.lon - p.lon) * M_LON, by = (b.lat - p.lat) * M_LAT;
+      const dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy, t = L2 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / L2)) : 0;
+      return Math.hypot(ax + t * dx, ay + t * dy);
+    }
+    function detourPathStop(stop, d) {
+      let best = null;
+      for (const det of detours.filter(x => x.route === d.route)) {
+        const path = det.path.map(([lat, lon]) => ({ lat, lon }));
+        const box = path.reduce((b, p) => [Math.min(b[0], p.lat), Math.max(b[1], p.lat), Math.min(b[2], p.lon), Math.max(b[3], p.lon)], [90, -90, 180, -180]);
+        for (const s of stops.values()) {
+          if (s === stop || (s.stopId && d.alert.stopSet.has(s.stopId))) continue;
+          if (s.lat < box[0] - 0.0003 || s.lat > box[1] + 0.0003 || s.lon < box[2] - 0.0004 || s.lon > box[3] + 0.0004) continue;
+          let nm = Infinity, head = null;
+          for (let i = 1; i < path.length; i++) { const m = segMetres(s, path[i - 1], path[i]); if (m < nm) { nm = m; head = cardOf(bearing(path[i - 1], path[i])); } }
+          if (nm > 25) continue;
+          cornerOf(s);
+          if (s.travel !== head) continue;                       // other side of the street
+          const m = metres(stop, s);
+          if (!best || m < best.m) best = { stop: s, m };
+        }
+      }
+      return best;
+    }
+
+    // The last stop before the skipped stretch and the first one after it, in this direction.
+    function detourEnds(stop, d) {
+      const out = {};
+      for (const dir of routeDirs.get(d.route) || []) {
+        if (!dir.keys.includes(stop.key) || !dirMatches(d.alert.direction, dir.title)) continue;
+        const skipped = dir.keys.map(k => { const s = stops.get(k); return !!(s?.stopId && d.alert.stopSet.has(s.stopId)); });
+        const first = skipped.indexOf(true), last = skipped.lastIndexOf(true);
+        if (first < 0) continue;
+        const pick = i => { const s = stops.get(dir.keys[i]); return s && { stop: s, m: metres(stop, s) }; };
+        if (first > 0 && !out.before) out.before = pick(first - 1);
+        if (last + 1 < dir.keys.length && !out.after) out.after = pick(last + 1);
+      }
+      return out;
+    }
+
     // Street names a detour runs on, from text like "Detour via Church St, Maitland St and Jarvis St".
     const SUFFIX = /\b(st|street|ave|avenue|rd|road|blvd|boulevard|dr|drive|cres|crescent|crt|court|pkwy|parkway|hwy|ln|lane|way|cir|circle|trl|trail|gate|gdns|pl|place|sq|e|w|n|s|east|west|north|south)\b\.?/g;
     const streetKey = name => name.toLowerCase().replace(/[.']/g, '').replace(SUFFIX, ' ').replace(/\s+/g, ' ').trim();
@@ -523,12 +566,20 @@
             `</div>`;
         }
         let html = `<div class="advisory"><div class="head">${rt}${dirNote} is not stopping here</div>${text}`;
-        const regular = nearestRegularStop(stop, d);
-        const detour = nearestDetourStop(stop, d);
-        if (detour && (!regular || detour.stop !== regular.stop) && (!regular || detour.m < regular.m * 1.5))
-          html += `<div class="alt">Closest stop on the detour path: ${stopLink(detour.stop)}, ${walk(detour.m)}.</div>`;
-        if (regular)
-          html += `<div class="alt">Nearest stop where ${rt} still stops normally: ${stopLink(regular.stop)}, ${walk(regular.m)}.</div>`;
+        // Where to catch it instead: on the detour (the TTC's own detour path when it has one,
+        // stops where traffic goes the detour's way), before the skipped stretch, or after it.
+        const onPath = detourPathStop(stop, d);
+        const detour = onPath || nearestDetourStop(stop, d);
+        const ends = detourEnds(stop, d);
+        if (detour)
+          html += `<div class="alt">${onPath ? 'First stop on the detour route' : 'Closest stop on the detour streets'}: ${stopLink(detour.stop)}, ${walk(detour.m)}.` +
+                  `${onPath ? '' : ' <span class="src">(from the alert text; check the direction)</span>'}</div>`;
+        if (ends.before) html += `<div class="alt">Or catch it before the detour: ${stopLink(ends.before.stop)}, ${walk(ends.before.m)}.</div>`;
+        if (ends.after) html += `<div class="alt">It's back on its regular route from ${stopLink(ends.after.stop)}, ${walk(ends.after.m)}.</div>`;
+        if (!detour && !ends.before && !ends.after) {
+          const regular = nearestRegularStop(stop, d);
+          if (regular) html += `<div class="alt">Nearest stop where ${rt} still stops normally: ${stopLink(regular.stop)}, ${walk(regular.m)}.</div>`;
+        }
         if (a.shuttleType || SHUTTLE_RE.test(`${a.title} ${a.headerText} ${a.description}`))
           html += `<div class="alt"><b>Replacement buses:</b> ${escapeHtml(a.shuttleType && !/^running$/i.test(a.shuttleType) ? a.shuttleType : 'the TTC says shuttle buses are running')}` +
                   `${a.shuttleStart ? ' from ' + escapeHtml(a.shuttleStart) : ''}${a.shuttleEnd ? ' to ' + escapeHtml(a.shuttleEnd) : ''}.</div>`;
