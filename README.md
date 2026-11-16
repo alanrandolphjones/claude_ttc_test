@@ -55,6 +55,13 @@ A single-page map of every TTC bus and streetcar stop.
 - **Streetcar vs replacement bus at a stop:** stops are coloured and labelled by the branches
   that actually serve them (e.g. "506 bus" at Yonge & College), and the "doesn't stop here"
   check works per direction and per mode.
+- **Exact detour stops:** the server reads the TTC's trip updates for detoured trips
+  (`gtfsrt.ttc.ca/trips/modified_update`, every 90 s, `/api/detour-stops`), which list each
+  detoured trip's stops with predicted times. Stops a detour serves that aren't on the route's
+  regular stop list get a dashed orange ring and a "The 95 detour stops here" box with times;
+  skipped stops name the first stop the detoured trips actually serve and list the rest.
+- **Route lines follow alerts:** routes with an active alert are rebuilt every 10 minutes and
+  as soon as their alerts change; the page re-fetches the route map when alerts change.
 - **Bus vs streetcar:** the live feed doesn't label vehicle type, so the streetcar route
   list in `index.html` (`STREETCAR_ROUTES`) is taken from the TTC's GTFS schedule data
   (Toronto Open Data, `routes.txt` where `route_type = 0`).

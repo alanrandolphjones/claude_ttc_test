@@ -109,7 +109,8 @@
     <label><input type="checkbox" id="showBus" checked> <span class="dot" style="background:var(--bus)"></span> Bus</label>
     <label><input type="checkbox" id="showStreetcar" checked> <span class="dot" style="background:var(--streetcar)"></span> Streetcar</label>
     <label style="color:var(--muted)"><span class="dot" style="background:linear-gradient(90deg, var(--bus) 50%, var(--streetcar) 50%)"></span> Bus and streetcar</label>
-    <label style="color:var(--muted)"><span class="dot" style="background:#fff;box-shadow:0 0 0 2.5px var(--alert)"></span> Detour / no service</label>
+    <label style="color:var(--muted)"><span class="dot" style="background:#fff;box-shadow:0 0 0 2.5px var(--alert)"></span> Detour skips this stop</label>
+    <label style="color:var(--muted)"><span class="dot" style="background:#fff;border:2px dashed var(--alert);box-shadow:none;width:9px;height:9px"></span> Detour stops here</label>
     <label><input type="checkbox" id="showDetours" checked> <span class="dash"></span> Detour paths (TTC)</label>
     <label style="color:var(--muted)"><span class="dot" style="background:#9a9aa0"></span> Stop not in service</label>
     <select id="routeFilter"><option value="">All routes</option></select>
@@ -302,7 +303,7 @@
     // The TTC doesn't allow browsers to read that feed directly, so server.js relays it.
     const ALERTS_URL = 'api/alerts';
     const BYPASS = new Set(['DETOUR', 'NO_SERVICE', 'REDUCED_SERVICE', 'STOP_MOVED', 'MODIFIED_SERVICE']);
-    let alerts = [], alertsOk = null, affectedKeys = new Set(), alertRetries = 0;
+    let alerts = [], alertsOk = null, affectedKeys = new Set(), alertRetries = 0, alertSig = null;
 
     // alerts.ttc.ca marks "no end" as year 0001; GTFS-realtime alerts may have several periods.
     const periodsOf = a => (a.activePeriods?.length ? a.activePeriods : [a.activePeriod || {}]).map(p => ({
@@ -328,6 +329,10 @@
           // An upcoming alert never means "not stopping here" yet.
           .map(a => ({ ...a, upcoming: a.timing.state === 'upcoming', stopSet: new Set(asArray(a.stops).map(String)) }));
         alertsOk = true;
+        // New, changed or ended alerts: the server rebuilds those routes' lines; fetch them.
+        const sig = alerts.filter(a => !a.upcoming).map(a => a.route + ':' + a.id).sort().join(',');
+        if (alertSig !== null && sig !== alertSig) loadNetwork();
+        alertSig = sig;
         if (alertRetries) { alertRetries = 0; loadGhosts(); }      // back after a failure: refresh what depends on alerts
       } catch (e) {
         alertsOk = false;
@@ -577,9 +582,20 @@
         let html = `<div class="advisory"><div class="head">${rt}${dirNote} is not stopping here</div>${text}`;
         // Where to catch it instead: on the detour (the TTC's own detour path when it has one,
         // stops where traffic goes the detour's way), before the skipped stretch, or after it.
-        const onPath = detourPathStop(stop, d);
-        const detour = onPath || nearestDetourStop(stop, d);
         const ends = detourEnds(stop, d);
+        // Best: the TTC's own list of stops the detoured trips serve.
+        const myDir = (routeDirs.get(d.route) || []).find(x => x.keys.includes(stop.key) && dirMatches(d.alert.direction, x.title));
+        const trip = detourTripFor(d.route, myDir?.title);
+        const listed = trip ? trip.detourStops.map(id => [...stops.values()].find(s => s.stopId === id)).filter(Boolean) : [];
+        if (listed.length) {
+          const first = listed[0];
+          html += `<div class="alt">First stop on the detour route: ${stopLink(first)}, ${walk(metres(stop, first))}` +
+            `${trip.times[first.stopId]?.length ? ' · next ' + trip.times[first.stopId].map(minsFrom).join(', ') : ''}.</div>`;
+          if (listed.length > 1) html += `<div class="alt">Detour stops, in order: ${listed.map(s => escapeHtml(s.title) + (s.stopId ? ' (#' + s.stopId + ')' : '')).join(' → ')}</div>`;
+          html += `<div class="src">Stops from the TTC's trip data for detoured ${rt} buses</div>`;
+        }
+        const onPath = listed.length ? null : detourPathStop(stop, d);
+        const detour = listed.length ? null : onPath || nearestDetourStop(stop, d);
         if (detour)
           html += `<div class="alt">${onPath ? 'First stop on the detour route' : 'Closest stop on the detour streets'}: ${stopLink(detour.stop)}, ${walk(detour.m)}.` +
                   `${onPath ? '' : ' <span class="src">(from the alert text; check the direction)</span>'}</div>`;
@@ -716,6 +732,33 @@
       }).join('');
     }
 
+    // ---- Detour stops (TTC GTFS-realtime trip updates for detoured trips, via server.js) -------
+    // The stops detoured trips actually serve, in order, with predicted times; detourStops are
+    // the ones the route doesn't normally serve.
+    let detourTrips = [], detourStopIndex = new Map();
+    async function loadDetourStops() {
+      try {
+        const res = await fetch('api/detour-stops', { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        detourTrips = (await res.json()).detours || [];
+      } catch { return; }
+      const next = new Map();
+      for (const d of detourTrips) for (const id of d.detourStops) {
+        if (!next.has(id)) next.set(id, []);
+        next.get(id).push(d);
+      }
+      const changed = next.size !== detourStopIndex.size || [...next.keys()].some(k => !detourStopIndex.has(k));
+      detourStopIndex = next;
+      if (changed && stops.size && !map._popup?.isOpen()) updateStatus();
+      refreshArrivals?.();
+    }
+    // The detour (if the TTC lists one) for this route in this stop's direction ("towards ...").
+    function detourTripFor(route, dirTitle) {
+      const list = detourTrips.filter(d => d.route === route);
+      return list.find(d => dirTitle && d.headsign && dirTitle.toLowerCase().includes(d.headsign.toLowerCase())) || (list.length === 1 ? list[0] : null);
+    }
+    const minsFrom = t => { const m = Math.round((t - Date.now()) / 60000); return m <= 0 ? 'Due' : m + ' min'; };
+
     // ---- Detour paths (TTC GTFS-realtime trip modifications, via server.js) ----------------
     let detours = [];
     const torontoYmd = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/Toronto' }).replace(/-/g, '');
@@ -790,7 +833,7 @@
       weight: (z >= 15 ? 4 : z >= 13 ? 3 : 1.8) + (mode === 'streetcar' ? 1 : 0),
       opacity: dim ? 0.15 : mode === 'streetcar' ? 0.7 : 0.55,
     });
-    let networkLines = [], highlighted = null, highlightLines = [];
+    let networkLines = [], highlighted = null, highlightLines = [], networkVersion = null;
 
     // Keep lines under the stops: network at the back, then the highlighted route, then detours.
     // bringToBack puts each line under everything so far, so go from the top layer down.
@@ -806,6 +849,8 @@
         const res = await fetch('api/network');
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
+        if (data.version && data.version === networkVersion) return;     // unchanged
+        networkVersion = data.version;
         const z = map.getZoom();
         networkLayer.clearLayers();
         networkLines = [];
@@ -1160,7 +1205,11 @@
         }
       }
       rows.sort((a, b) => a.bypassed - b.bypassed || a.first - b.first);
-      const advisory = advisoryHtml(stop, disruptions.filter(d => d.bypass)) + boardingHtml(stop) + detourNoteHtml(stop) +
+      const servedBy = stop.stopId ? (detourStopIndex.get(stop.stopId) || []) : [];
+      const detourHere = servedBy.map(d => `<div class="advisory"><div class="head">The ${escapeHtml(d.route)} detour stops here</div>` +
+        `${escapeHtml(d.route)} towards ${escapeHtml(d.headsign || '')}${d.times[stop.stopId]?.length ? ' · <b>' + d.times[stop.stopId].map(minsFrom).join(', ') + '</b>' : ''}` +
+        `<div class="src">From the TTC's trip data for detoured buses; this stop isn't on the ${escapeHtml(d.route)}'s regular route</div></div>`).join('');
+      const advisory = detourHere + advisoryHtml(stop, disruptions.filter(d => d.bypass)) + boardingHtml(stop) + detourNoteHtml(stop) +
                        (alertsOk === false ? '' : advisoryHtml(stop, disruptions.filter(d => !d.bypass)));
       const fmt = sec => sec < 60 ? 'Due' : Math.floor(sec / 60) + ' min';
       const now = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
@@ -1192,10 +1241,12 @@
         // With one route picked, colour its stops by that route (506B = bus, 506 = streetcar).
         const kind = routeTag ? (splitRoute(routeTag).bus || !isStreetcar(routeTag) ? 'bus' : 'streetcar') : stopKind(stop, visibleRoutes);
         const hit = affectedKeys.has(key);
-        stop.hit = hit;
+        const onDetour = !hit && stop.stopId && detourStopIndex.has(stop.stopId);
+        stop.hit = hit || onDetour;
         // Bus and streetcar at one stop: half red, half green instead of a third colour.
         stop.marker = (kind === 'both' ? splitMarker : L.circleMarker)([stop.lat, stop.lon], {
-          renderer, radius: stopRadius(map.getZoom(), hit), weight: stopWeight(map.getZoom(), hit), color: hit ? '#f08c00' : '#fff',
+          renderer, radius: stopRadius(map.getZoom(), hit || onDetour), weight: stopWeight(map.getZoom(), hit || onDetour), color: hit || onDetour ? '#f08c00' : '#fff',
+          dashArray: onDetour ? '3 2' : null,
           fillColor: kind === 'both' ? COLORS.bus : COLORS[kind], fillColor2: COLORS.streetcar, fillOpacity: 0.9
         }).bindPopup(() => popupEl(stop), popupOptions())
           .on('popupopen', e => startArrivals(stop, e.popup))
@@ -1263,7 +1314,7 @@
       updateStatus(done, routes.length);
       if (failed.length) $('status').textContent += ` · failed: ${failed.join(', ')}`;
       $('bar').style.display = 'none';
-      await Promise.all([loadAlerts(), loadDetours()]);
+      await Promise.all([loadAlerts(), loadDetours(), loadDetourStops()]);
       await loadGhosts();                       // needs stops and alerts
     }
 
@@ -1294,6 +1345,8 @@
     loadNetwork();
     setInterval(loadAlerts, 2 * 60 * 1000);
     setInterval(loadDetours, 5 * 60 * 1000);
+    setInterval(loadDetourStops, 90 * 1000);
+    setInterval(() => loadNetwork(), 10 * 60 * 1000);
     setInterval(loadGhosts, 15 * 60 * 1000);
     $('routeFilter').addEventListener('change', drawGhosts);
     $('showDetours').addEventListener('change', drawDetours);
