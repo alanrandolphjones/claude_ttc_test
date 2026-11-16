@@ -967,20 +967,14 @@
         if (nearest < 20 || !routes.size) continue;                                   // a live stop is here
         const g = { key: 'osm:' + o.id, ghost: true, lat: o.lat, lon: o.lon, title: o.name || 'Unnamed stop',
                     stopId: '', osmRef: o.ref, routes, tags: new Map() };
-        // The stop on the other corner serves the other direction: keep only directions no live
-        // stop of the route serves at this intersection (at Yonge & College, #848 is eastbound,
-        // so the mapped stop on the northeast corner is the westbound one).
-        const servedNear = new Map();
-        for (const s of stops.values()) {
-          if (Math.abs(s.lat - o.lat) > 0.0008 || Math.abs(s.lon - o.lon) > 0.0011 || metres(o, s) > 80) continue;
-          for (const r of s.routes.keys()) for (const d of routeDirs.get(r) || []) if (d.keys.includes(s.key)) {
-            if (!servedNear.has(r)) servedNear.set(r, new Set());
-            servedNear.get(r).add(dirWord(d.title));
-          }
-        }
+        // Which direction would this mapped stop serve? Vehicles stop on their right, so compare
+        // its side of the street with the nearest live stop of the route: same side, same
+        // direction; across the street, the other one. It's out of service only if no live stop
+        // serves that direction here (a mapped stop beside a live one of the same direction is
+        // just outdated, like King & University #4736, replaced by #15642 25 m away).
+        if (movedStop(g)) continue;
         const all = missingDirections(g);
-        g.missing = all.filter(m => !servedNear.get(m.route)?.has(m.word));
-        if (!g.missing.length) g.missing = [];
+        g.missing = all.filter(m => sideDirection(g, m.route) === m.word);
         // OSM often maps one stop twice (the pole and the stopping point on the road): keep one.
         if (g.missing.length && !next.some(x => metres(x, g) < 25)) next.push(g);
       }
@@ -998,6 +992,39 @@
           renderer, radius: stopRadius(z, false), weight: stopWeight(z, false), color: '#fff', fillColor: '#9a9aa0', fillOpacity: 0.95,
         }).bindPopup(() => ghostPopupHtml(g), popupOptions()).addTo(ghostLayer);
       }
+    }
+
+    // A live stop within 40 m on the same side of the street means the mapped stop was moved or
+    // renumbered (OSM not updated), not closed.
+    function movedStop(g) {
+      for (const s of stops.values()) {
+        if (Math.abs(s.lat - g.lat) > 0.0005 || Math.abs(s.lon - g.lon) > 0.0007 || metres(g, s) > 40) continue;
+        cornerOf(s);
+        if (!s.travel) continue;
+        const right = { north: [1, 0], east: [0, -1], south: [-1, 0], west: [0, 1] }[s.travel];
+        const across = (g.lon - s.lon) * M_LON * right[0] + (g.lat - s.lat) * M_LAT * right[1];
+        if (across > -8) return true;
+      }
+      return false;
+    }
+
+    function sideDirection(g, route) {
+      let best = null;
+      for (const s of stops.values()) {
+        if (!s.routes.has(route) || Math.abs(s.lat - g.lat) > 0.0012 || Math.abs(s.lon - g.lon) > 0.0016) continue;
+        const m = metres(g, s);
+        if (m > 150 || (best && m >= best.m)) continue;
+        const d = (routeDirs.get(route) || []).find(d => d.keys.includes(s.key));
+        cornerOf(s);                                          // sets s.travel (physical heading)
+        if (d && s.travel) best = { s, m, word: dirWord(d.title) };
+      }
+      if (!best) return null;
+      // How far the mapped stop is to the right of the live stop, across the street.
+      const right = { north: [1, 0], east: [0, -1], south: [-1, 0], west: [0, 1] }[best.s.travel];   // unit [east, north]
+      const across = (g.lon - best.s.lon) * M_LON * right[0] + (g.lat - best.s.lat) * M_LAT * right[1];
+      if (across > -8) return best.word;                     // same side of the street
+      const words = new Set((routeDirs.get(route) || []).map(d => dirWord(d.title)).filter(Boolean));
+      return [...words].find(w => w !== best.word && OPPOSITE[w] === best.word) || [...words].find(w => w !== best.word) || null;
     }
 
     function ghostPopupHtml(g) {
