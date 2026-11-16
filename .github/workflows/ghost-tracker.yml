@@ -46,7 +46,7 @@ jobs:
             git worktree add data-branch FETCH_HEAD
           else
             git worktree add --detach data-branch
-            (cd data-branch && git checkout --orphan ghost-data && git rm -rq . && echo "Ghost tracker results. See scripts/ghost-tracker.js on the main branch." > README.md)
+            (cd data-branch && git checkout --orphan ghost-data && git rm -rqf . && echo "Ghost tracker results. See scripts/ghost-tracker.js on the main branch." > README.md)
           fi
           mkdir -p "data-branch/runs/$(dirname "$STAMP")"
           cp "out/$STAMP.json" "data-branch/runs/$STAMP.json"
