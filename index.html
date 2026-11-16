@@ -281,10 +281,12 @@
         if (!isStreetcar(t)) { branches.clear(); branches.set(t, 'bus'); }
         if (!branches.size) branches.set(t, isStreetcar(t) ? 'streetcar' : 'bus');
         // Streetcar not stopping here right now (only its replacement bus): show it greyed out.
-        if (isStreetcar(t) && ![...branches.values()].includes('streetcar')) branches.set(t, 'off');
-        return [...branches].sort().map(([code, mode]) =>
-          `<button type="button" class="chip${mode === 'off' ? ' off' : ''}" data-route="${escapeHtml(mode === 'bus' && isStreetcar(t) ? code : t)}" style="background:${mode === 'off' ? '#b5b5ba' : mode === 'streetcar' ? COLORS.streetcar : COLORS.bus}" ` +
-          `title="${mode === 'off' ? code + ' streetcar isn\'t stopping here right now. ' : mode === 'bus' && isStreetcar(t) ? 'Replacement bus. ' : ''}Show ${escapeHtml(stop.routes.get(t))} on the map">${escapeHtml(code)}</button>`);
+        // Its own key, so a replacement bus without a branch letter (503) keeps its chip.
+        if (isStreetcar(t) && ![...branches.values()].includes('streetcar')) branches.set(t + '\u0000off', 'off');
+        return [...branches].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).map(([key, mode]) => {
+          const code = key.split('\u0000')[0];
+          return `<button type="button" class="chip${mode === 'off' ? ' off' : ''}" data-route="${escapeHtml(mode === 'bus' && isStreetcar(t) && code !== t ? code : t)}" style="background:${mode === 'off' ? '#b5b5ba' : mode === 'streetcar' ? COLORS.streetcar : COLORS.bus}" ` +
+          `title="${mode === 'off' ? code + ' streetcar isn\'t stopping here right now. ' : mode === 'bus' && isStreetcar(t) ? 'Replacement bus. ' : ''}Show ${escapeHtml(stop.routes.get(t))} on the map">${escapeHtml(code)}</button>`; });
       }).join('');
       return `<div class="popup"><h3>${escapeHtml(stop.title)}</h3>
         <div class="meta">${stop.stopId ? 'Stop #' + stop.stopId : 'No stop number'}${cornerOf(stop) ? ' · ' + escapeHtml(cornerOf(stop, true)) : ''} · ${tags.length} route${tags.length === 1 ? '' : 's'}</div>
@@ -711,7 +713,10 @@
     function boardingHtml(stop) {
       // A stop serves one direction, so its popup is about that direction. The other direction
       // shows only if no out-of-service stop on the other side carries it ("Going westbound?").
-      const list = stop.ghost ? stop.missing : missingDirections(stop).filter(x => x.partial || !ghostFor(stop, x.route, x.word));
+      // The other direction often stops on a far corner across a wide intersection (King &
+      // Spadina, ~120 m): only worth a note when none of its stops is within 200 m.
+      const list = stop.ghost ? stop.missing : missingDirections(stop)
+        .filter(x => x.partial || (!ghostFor(stop, x.route, x.word) && x.opts[0].m > 200));
       // Routes sharing the same alternatives (e.g. 306 and 506) get one box.
       const merged = new Map();
       for (const x of list) {
