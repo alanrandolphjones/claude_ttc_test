@@ -191,6 +191,11 @@
     // Streetcar routes also run replacement buses on their own branches ("506b ... Replacement
     // Bus"), which can stop where streetcars don't. Judge each stop by the branches serving it.
     const modeOf = (route, dir) => isStreetcar(route) && !/\bbus\b/i.test(dir.title) ? 'streetcar' : 'bus';
+    // The TTC's branch code from a direction name: "East - 506b Carlton Replacement Bus ..." -> "506B".
+    const branchLetter = title => ((String(title).match(/^\w+\s*-\s*\d+([a-z]?)\b/i) || [])[1] || '').toUpperCase();
+    const branchCode = (route, title) => route + branchLetter(title);
+    const branchCodes = (routes, title) => routes.map(r => r + branchLetter(title)).join(' / ');
+
     function isStreetcarAt(stop, route) {
       if (!isStreetcar(route)) return false;
       const modes = new Set((routeDirs.get(route) || []).filter(d => d.keys.includes(stop.key)).map(d => modeOf(route, d)));
@@ -205,10 +210,17 @@
 
     function popupHtml(stop) {
       const tags = [...stop.routes.keys()].sort((a, b) => parseInt(a) - parseInt(b));
-      const chips = tags.map(t => {
-        const car = isStreetcarAt(stop, t), busOnly = isStreetcar(t) && !car;
-        return `<button type="button" class="chip" data-route="${escapeHtml(t)}" style="background:${car ? COLORS.streetcar : COLORS.bus}" ` +
-          `title="${busOnly ? 'Only the replacement bus stops here. ' : ''}Show ${escapeHtml(stop.routes.get(t))} on the map">${t}${busOnly ? ' bus' : ''}</button>`;
+      // One chip per branch that stops here, labelled the TTC's way (506, 506B, 39A ...).
+      const chips = tags.flatMap(t => {
+        const served = (routeDirs.get(t) || []).filter(d => d.keys.includes(stop.key));
+        const branches = new Map();
+        for (const d of served) branches.set(branchCode(t, d.title), modeOf(t, d));
+        // Bus-route branches (39A, 39B) vary by trip and show on each arrival row; one chip is enough.
+        if (!isStreetcar(t)) { branches.clear(); branches.set(t, 'bus'); }
+        if (!branches.size) branches.set(t, isStreetcar(t) ? 'streetcar' : 'bus');
+        return [...branches].sort().map(([code, mode]) =>
+          `<button type="button" class="chip" data-route="${escapeHtml(t)}" style="background:${mode === 'streetcar' ? COLORS.streetcar : COLORS.bus}" ` +
+          `title="${mode === 'bus' && isStreetcar(t) ? 'Replacement bus. ' : ''}Show ${escapeHtml(stop.routes.get(t))} on the map">${escapeHtml(code)}</button>`);
       }).join('');
       return `<div class="popup"><h3>${escapeHtml(stop.title)}</h3>
         <div class="meta">${stop.stopId ? 'Stop #' + stop.stopId : 'No stop number'}${cornerOf(stop) ? ' · ' + escapeHtml(cornerOf(stop, true)) : ''} · ${tags.length} route${tags.length === 1 ? '' : 's'}</div>
@@ -552,15 +564,19 @@
       }
       return [...groups.values()].sort((a, b) => b.partial - a.partial).map(x => {
         const items = x.opts.map(o => {
-          // "West - 506 Carlton towards High Park" -> "Carlton towards High Park" (shared by 306/506).
-          const name = o.dir.title.replace(/^\w+\s*-\s*/, '').replace(/^\d+[a-z]?\s+/i, '');
-          const kind = isStreetcar(x.route) ? (modeOf(x.route, o.dir) === 'bus' ? ' (bus)' : ' (streetcar)') : '';
+          // "West - 506b Carlton Replacement Bus towards Spadina Station" -> "506B / 306B Carlton Replacement Bus towards ..."
+          const name = branchCodes(x.routes, o.dir.title) + ' ' + o.dir.title.replace(/^\w+\s*-\s*/, '').replace(/^\d+[a-z]?\s+/i, '');
+          const kind = isStreetcar(x.route) && modeOf(x.route, o.dir) === 'streetcar' ? ' (streetcar)' : '';
           return `<li><b>${escapeHtml(name)}${kind}</b>: ${stopLink(o.stop)}, ${walk(o.m)}</li>`;
         }).join('');
         const what = isStreetcar(x.route) && x.mode !== 'any' ? (x.mode === 'streetcar' ? ' streetcar' : ' replacement bus') : '';
-        const other = !x.partial ? '' : x.mode === 'streetcar' ? 'Only the replacement bus stops here going this way. ' : 'Only the streetcar stops here going this way. ';
+        const label = x.mode === 'bus' && isStreetcar(x.route) ? branchCodes(x.routes, x.opts[0].dir.title) : x.routes.join(' / ');
+        const servedBus = (routeDirs.get(x.route) || []).find(d => d.keys.includes(stop.key) && modeOf(x.route, d) === 'bus');
+        const other = !x.partial ? '' : x.mode === 'streetcar'
+          ? `Only the ${servedBus ? branchCodes(x.routes, servedBus.title) + ' ' : ''}replacement bus stops here going this way. `
+          : 'Only the streetcar stops here going this way. ';
         const ask = !stop.ghost && !x.partial ? `Going ${DIR_NAME[x.word].toLowerCase()}? ` : '';
-        return `<div class="advisory board"><div class="head">${ask}${DIR_NAME[x.word]} ${escapeHtml(x.routes.join(' / '))}${what} doesn't stop at this corner right now</div>` +
+        return `<div class="advisory board"><div class="head">${ask}${DIR_NAME[x.word]} ${escapeHtml(label)}${what} doesn't stop at this corner right now</div>` +
           `${other}Board ${what ? 'the ' + DIR_NAME[x.word].toLowerCase() + what : DIR_NAME[x.word].toLowerCase()} at:<ul>${items}</ul></div>`;
       }).join('');
     }
@@ -742,7 +758,8 @@
       const item = (style, text) => `<div class="it"><span class="sw" style="${style}"></span>${text}</div>`;
       const mode = data.streetcar ? 'streetcar' : 'route';
       let legend = item(`border-top-color:${routeColor(r)}`, data.streetcar ? 'Where the streetcar runs now (TTC live data)' : 'Where it runs now (TTC live data)');
-      if (repBus.length) legend += item(`border-top-color:${COLORS.bus};border-top-style:dashed`, 'Replacement bus');
+      const busCodes = [...new Set((routeDirs.get(r) || []).filter(d => modeOf(r, d) === 'bus').map(d => branchCode(r, d.title)))].join(', ');
+      if (repBus.length) legend += item(`border-top-color:${COLORS.bus};border-top-style:dashed`, `Replacement bus${busCodes ? ' (' + escapeHtml(busCodes) + ')' : ''}`);
       if (changed.length) legend += item('border-top-color:#f08c00', data.streetcar ? 'Streetcar off its regular route' : 'Off its regular route');
       if (notServed.length) legend += item('border-top-color:#6b6b70;border-top-style:dotted', data.streetcar ? 'Regular route with no streetcar or bus right now' : 'Regular route, not served right now');
       if (busCovers.length) legend += item('border-top-color:#6b6b70;border-top-style:dotted', 'Regular route with no streetcar; the replacement bus covers it');
@@ -916,7 +933,7 @@
       const now = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
       if (!rows.length) return advisory + `<div class="none">No vehicles predicted right now.</div><div class="updated">Checked ${now}</div>`;
       return advisory + rows.map(r => `<div class="row${r.bypassed ? ' bypassed' : ''}">
-          <span class="chip" style="background:${isStreetcar(r.route) && !r.shuttle ? COLORS.streetcar : COLORS.bus}">${escapeHtml(r.route)}</span>
+          <span class="chip" style="background:${isStreetcar(r.route) && !r.shuttle ? COLORS.streetcar : COLORS.bus}">${escapeHtml(branchCode(r.route, r.dir))}</span>
           <div><div class="times">${r.preds.map(fmt).join(', ')}</div>${r.bypassed ? '<span class="flag">Detoured: won\'t stop here</span>' : ''}${r.shuttle ? '<span class="shuttle">BUS</span>' : ''}
           <div class="dir">${escapeHtml(r.dir)}</div></div>
         </div>`).join('') + `<div class="updated">Live · updated ${now} · refreshes every 30s</div>`;
