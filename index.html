@@ -833,7 +833,7 @@
       weight: (z >= 15 ? 4 : z >= 13 ? 3 : 1.8) + (mode === 'streetcar' ? 1 : 0),
       opacity: dim ? 0.15 : mode === 'streetcar' ? 0.7 : 0.55,
     });
-    let networkLines = [], highlighted = null, highlightLines = [], networkVersion = null;
+    let networkLines = [], highlighted = null, highlightLines = [], networkVersion = null, networkRetries = 0;
 
     // Keep lines under the stops: network at the back, then the highlighted route, then detours.
     // bringToBack puts each line under everything so far, so go from the top layer down.
@@ -849,6 +849,9 @@
         const res = await fetch('api/network');
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
+        // Schedule lines while the server builds live ones: check again shortly.
+        if (data.source !== 'live') setTimeout(loadNetwork, 45000);
+        networkRetries = 0;
         if (data.version && data.version === networkVersion) return;     // unchanged
         networkVersion = data.version;
         const z = map.getZoom();
@@ -866,7 +869,10 @@
           }
         }
         restack();
-      } catch { /* the map works without route lines */ }
+      } catch {
+        // The map works without route lines, but keep trying (e.g. the server is restarting).
+        if (networkRetries < 6) setTimeout(loadNetwork, 5000 * 2 ** networkRetries++);
+      }
     }
 
     map.on('zoomend', () => {
