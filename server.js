@@ -23,6 +23,7 @@ function send(res, status, body, type = 'application/json', extra = {}) {
 }
 
 const API = {
+  '/healthz': async () => JSON.stringify({ ok: true, observer: observer.status() }),
   '/api/alerts': async () => getAlerts(),
   '/api/detours': async () => JSON.stringify(await getDetours()),
   '/api/observations': async url => JSON.stringify({

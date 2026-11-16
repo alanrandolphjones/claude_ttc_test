@@ -1,0 +1,14 @@
+{
+  "name": "ttc-stop-map",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Map of every TTC bus and streetcar stop with live arrivals, checked against TTC detours and service changes.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "report": "node report.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

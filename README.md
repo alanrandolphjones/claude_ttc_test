@@ -80,3 +80,26 @@ The page also runs from any static host (GitHub Pages, or `python3 -m http.serve
 then there's no relay: stops and arrival times still work, and the page says detour info
 is unavailable. For detour checking on a static host, run the relay somewhere (any Node
 host, or port it to a serverless function) and point `ALERTS_URL` in `index.html` at it.
+
+## Deploy
+
+Any host that runs Node.js 20+ as an always-on process with a persistent disk works. The
+server needs no build step and no packages; hosts detect it from `package.json`
+(`npm start`).
+
+Settings:
+
+| Variable | Purpose |
+|---|---|
+| `PORT` | Set by most hosts automatically. |
+| `DATA_DIR` | Where the schedule download and observations are kept. Point it at a persistent volume (e.g. `/data`). |
+| `OBSERVE=0` | Optional: turn the feed-disagreement observer off. |
+
+Health check path: `/healthz`.
+
+### Railway
+
+1. New project → Deploy from GitHub repo → pick this repo and branch.
+2. Add a volume to the service, mounted at `/data`.
+3. Variables: `DATA_DIR=/data`.
+4. Settings → Networking → Generate domain. Health check path: `/healthz`.
