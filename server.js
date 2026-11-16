@@ -4,6 +4,8 @@
 //   /api/alerts        live incidents (alerts.ttc.ca) + planned changes (GTFS-realtime), merged
 //   /api/detours       detour paths from the TTC's GTFS-realtime trip modifications feed
 //   /api/osm-stops     OpenStreetMap stops near routes with service changes (for out-of-service stops)
+//   /api/network       every bus/streetcar route line (from the schedule), for drawing the network
+//   /api/route?r=N     one route's live path and where it differs from the regular route
 //   /api/observations  what the background observer has learned about feeds disagreeing (?days=N)
 //
 // Set OBSERVE=0 to turn the observer off, OBSERVE_EVERY_MIN to change how often it runs.
@@ -14,13 +16,21 @@ const { getAlerts, staleAlerts } = require('./lib/alerts');
 const { getDetours } = require('./lib/detours');
 const observer = require('./lib/observer');
 const { getCandidates } = require('./lib/osm');
+const { getNetwork, getRoute } = require('./lib/routes');
+const zlib = require('node:zlib');
 
 const PORT = process.env.PORT || 8000;
 const ROOT = __dirname;
 const PUBLIC = new Set(['/index.html']);   // only serve the page itself, not server code or data
 
 function send(res, status, body, type = 'application/json', extra = {}) {
-  res.writeHead(status, { 'content-type': type, 'access-control-allow-origin': '*', ...extra });
+  const headers = { 'content-type': type, 'access-control-allow-origin': '*', vary: 'accept-encoding', ...extra };
+  // Compress text responses (the route network is a few hundred KB) when the browser allows it.
+  if (body && body.length > 1024 && /gzip/.test(res.req?.headers['accept-encoding'] || '') && /json|text|html/.test(type)) {
+    headers['content-encoding'] = 'gzip';
+    body = zlib.gzipSync(body);
+  }
+  res.writeHead(status, headers);
   res.end(body);
 }
 
@@ -29,6 +39,12 @@ const API = {
   '/api/alerts': async () => getAlerts(),
   '/api/detours': async () => JSON.stringify(await getDetours()),
   '/api/osm-stops': async () => JSON.stringify(await getCandidates()),
+  '/api/network': async () => getNetwork(),
+  '/api/route': async url => {
+    const r = url.searchParams.get('r') || '';
+    if (!/^\d{1,4}$/.test(r)) throw Object.assign(new Error('Unknown route'), { status: 400 });
+    return getRoute(r);
+  },
   '/api/observations': async url => JSON.stringify({
     status: observer.status(),
     routes: await observer.summarize(Math.min(31, Math.max(1, +url.searchParams.get('days') || 1))),
@@ -46,7 +62,7 @@ http.createServer(async (req, res) => {
   } catch (e) {
     // Serve stale alerts rather than nothing if the TTC is briefly unreachable.
     if (url.pathname === '/api/alerts' && staleAlerts()) return send(res, 200, staleAlerts(), 'application/json', { 'x-stale': '1' });
-    send(res, 502, e.message, 'text/plain');
+    send(res, e.status || 502, e.message, 'text/plain');
   }
 }).listen(PORT, () => {
   console.log(`TTC stop map on http://localhost:${PORT}`);
