@@ -530,10 +530,16 @@
       return out;
     }
 
+    // An out-of-service stop nearby that stands for this route and direction.
+    const ghostFor = (stop, route, word) => ghosts.find(g => g !== stop && metres(g, stop) < 120 && g.missing.some(m => m.route === route && m.word === word));
+
     function boardingHtml(stop) {
+      // A stop serves one direction, so its popup is about that direction. The other direction
+      // shows only if no out-of-service stop on the other side carries it ("Going westbound?").
+      const list = stop.ghost ? stop.missing : missingDirections(stop).filter(x => x.partial || !ghostFor(stop, x.route, x.word));
       // Routes sharing the same alternatives (e.g. 306 and 506) get one box.
       const merged = new Map();
-      for (const x of missingDirections(stop)) {
+      for (const x of list) {
         const k = x.route + '|' + x.word + '|' + x.partial;
         if (!merged.has(k)) merged.set(k, { ...x, opts: [...x.opts] });
         else { const m = merged.get(k); m.mode = m.mode === x.mode ? m.mode : 'any'; m.opts.push(...x.opts); m.opts.sort((a, b) => a.m - b.m); }
@@ -544,7 +550,7 @@
         if (!groups.has(sig)) groups.set(sig, { ...x, routes: [] });
         groups.get(sig).routes.push(x.route);
       }
-      return [...groups.values()].map(x => {
+      return [...groups.values()].sort((a, b) => b.partial - a.partial).map(x => {
         const items = x.opts.map(o => {
           // "West - 506 Carlton towards High Park" -> "Carlton towards High Park" (shared by 306/506).
           const name = o.dir.title.replace(/^\w+\s*-\s*/, '').replace(/^\d+[a-z]?\s+/i, '');
@@ -553,7 +559,8 @@
         }).join('');
         const what = isStreetcar(x.route) && x.mode !== 'any' ? (x.mode === 'streetcar' ? ' streetcar' : ' replacement bus') : '';
         const other = !x.partial ? '' : x.mode === 'streetcar' ? 'Only the replacement bus stops here going this way. ' : 'Only the streetcar stops here going this way. ';
-        return `<div class="advisory board"><div class="head">${DIR_NAME[x.word]} ${escapeHtml(x.routes.join(' / '))}${what} doesn't stop at this corner right now</div>` +
+        const ask = !stop.ghost && !x.partial ? `Going ${DIR_NAME[x.word].toLowerCase()}? ` : '';
+        return `<div class="advisory board"><div class="head">${ask}${DIR_NAME[x.word]} ${escapeHtml(x.routes.join(' / '))}${what} doesn't stop at this corner right now</div>` +
           `${other}Board ${what ? 'the ' + DIR_NAME[x.word].toLowerCase() + what : DIR_NAME[x.word].toLowerCase()} at:<ul>${items}</ul></div>`;
       }).join('');
     }
@@ -788,6 +795,8 @@
       const next = [];
       for (const o of data.stops || []) {
         if (o.ref && /^\d+$/.test(o.ref) && liveIds.has(String(+o.ref))) continue;   // it's a live stop
+        // Stations, loops and terminals: OSM's point rarely matches the TTC's bays there.
+        if (/\b(station|loop|terminal|platform|shuttle|go)\b/i.test(o.name)) continue;
         let nearest = Infinity;
         const routes = new Map();
         for (const s of stops.values()) {
@@ -799,7 +808,20 @@
         if (nearest < 20 || !routes.size) continue;                                   // a live stop is here
         const g = { key: 'osm:' + o.id, ghost: true, lat: o.lat, lon: o.lon, title: o.name || 'Unnamed stop',
                     stopId: '', osmRef: o.ref, routes, tags: new Map() };
-        g.missing = missingDirections(g);
+        // The stop on the other corner serves the other direction: keep only directions no live
+        // stop of the route serves at this intersection (at Yonge & College, #848 is eastbound,
+        // so the mapped stop on the northeast corner is the westbound one).
+        const servedNear = new Map();
+        for (const s of stops.values()) {
+          if (Math.abs(s.lat - o.lat) > 0.0008 || Math.abs(s.lon - o.lon) > 0.0011 || metres(o, s) > 80) continue;
+          for (const r of s.routes.keys()) for (const d of routeDirs.get(r) || []) if (d.keys.includes(s.key)) {
+            if (!servedNear.has(r)) servedNear.set(r, new Set());
+            servedNear.get(r).add(dirWord(d.title));
+          }
+        }
+        const all = missingDirections(g);
+        g.missing = all.filter(m => !servedNear.get(m.route)?.has(m.word));
+        if (!g.missing.length) g.missing = [];
         // OSM often maps one stop twice (the pole and the stopping point on the road): keep one.
         if (g.missing.length && !next.some(x => metres(x, g) < 25)) next.push(g);
       }
