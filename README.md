@@ -35,6 +35,11 @@ A single-page map of every TTC bus and streetcar stop.
 - **Detour paths:** drawn as dashed lines from the TTC's GTFS-realtime detour feed
   (`gtfsrt.ttc.ca/trips/detour`), trimmed to the part that leaves the route's scheduled path
   (from the published GTFS schedule). Orange = running today, purple = planned.
+- **Out-of-service stops:** while a stop is out of service the TTC removes it from its live
+  data and schedule, so the regular stop just disappears. The server fetches TTC stops from
+  OpenStreetMap once a day (Overpass API); where a mapped stop has no live stop and a route
+  with a service change is missing a direction there, the page shows it as a grey dashed
+  "not in service" stop with where to board instead.
 - **Bus vs streetcar:** the live feed doesn't label vehicle type, so the streetcar route
   list in `index.html` (`STREETCAR_ROUTES`) is taken from the TTC's GTFS schedule data
   (Toronto Open Data, `routes.txt` where `route_type = 0`).
@@ -70,6 +75,7 @@ node server.js
 
 - `/api/alerts`: TTC service alerts, merging the live and GTFS-realtime feeds (cached 60 s),
 - `/api/detours`: detour paths (cached 5 min),
+- `/api/osm-stops`: OpenStreetMap stops near routes with service changes (refreshed daily),
 - `/api/observations`: the observer's findings.
 
 On first start it downloads the TTC's published schedule (about 30 MB, refreshed daily) into

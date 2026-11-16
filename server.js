@@ -3,6 +3,7 @@
 //
 //   /api/alerts        live incidents (alerts.ttc.ca) + planned changes (GTFS-realtime), merged
 //   /api/detours       detour paths from the TTC's GTFS-realtime trip modifications feed
+//   /api/osm-stops     OpenStreetMap stops near routes with service changes (for out-of-service stops)
 //   /api/observations  what the background observer has learned about feeds disagreeing (?days=N)
 //
 // Set OBSERVE=0 to turn the observer off, OBSERVE_EVERY_MIN to change how often it runs.
@@ -12,6 +13,7 @@ const path = require('node:path');
 const { getAlerts, staleAlerts } = require('./lib/alerts');
 const { getDetours } = require('./lib/detours');
 const observer = require('./lib/observer');
+const { getCandidates } = require('./lib/osm');
 
 const PORT = process.env.PORT || 8000;
 const ROOT = __dirname;
@@ -26,6 +28,7 @@ const API = {
   '/healthz': async () => JSON.stringify({ ok: true, observer: observer.status() }),
   '/api/alerts': async () => getAlerts(),
   '/api/detours': async () => JSON.stringify(await getDetours()),
+  '/api/osm-stops': async () => JSON.stringify(await getCandidates()),
   '/api/observations': async url => JSON.stringify({
     status: observer.status(),
     routes: await observer.summarize(Math.min(31, Math.max(1, +url.searchParams.get('days') || 1))),

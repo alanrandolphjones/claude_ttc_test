@@ -86,6 +86,7 @@
     <label style="color:var(--muted)"><span class="dot" style="background:var(--both)"></span> Served by both</label>
     <label style="color:var(--muted)"><span class="dot" style="background:#fff;box-shadow:0 0 0 2.5px var(--alert)"></span> Detour / no service</label>
     <label><input type="checkbox" id="showDetours" checked> <span class="dash"></span> Detour paths (TTC)</label>
+    <label style="color:var(--muted)"><span class="dot" style="background:#fff;box-shadow:none;border:2px dashed #6b6b70;width:9px;height:9px"></span> Stop not in service</label>
     <select id="routeFilter"><option value="">All routes</option></select>
     <input type="search" id="search" placeholder="Search stop name or number…">
     </div>
@@ -115,6 +116,7 @@
 
     const renderer = L.canvas({ padding: 0.5 });
     const detourLayer = L.layerGroup().addTo(map);   // added first so stops draw on top
+    const ghostLayer = L.layerGroup().addTo(map);    // out-of-service stops, under live ones
     const layer = L.layerGroup().addTo(map);
     const stops = new Map();   // key -> { lat, lon, title, stopId, routes: Map(tag -> title) }
     const routeTitles = new Map();
@@ -547,6 +549,61 @@
       map.fitBounds(pts, { padding: [60, 60], maxZoom: 17 });
     });
 
+    // ---- Out-of-service stops (OpenStreetMap, via server.js) ------------------------------
+    // The TTC removes a stop from its live data while it's out of service, so the regular stop
+    // simply vanishes. OpenStreetMap still has it: show it greyed out where a route with a
+    // service change is missing a direction, with where to board instead.
+    let ghosts = [];
+
+    async function loadGhosts() {
+      let data;
+      try {
+        const res = await fetch('api/osm-stops', { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        data = await res.json();
+      } catch { ghosts = []; drawGhosts(); return; }
+      const liveIds = new Set([...stops.values()].map(s => s.stopId).filter(Boolean).map(x => String(+x)));
+      const next = [];
+      for (const o of data.stops || []) {
+        if (o.ref && /^\d+$/.test(o.ref) && liveIds.has(String(+o.ref))) continue;   // it's a live stop
+        let nearest = Infinity;
+        const routes = new Map();
+        for (const s of stops.values()) {
+          if (Math.abs(s.lat - o.lat) > 0.0012 || Math.abs(s.lon - o.lon) > 0.0016) continue;
+          const m = metres(o, s);
+          if (m < nearest) nearest = m;
+          if (m <= 80) for (const [r, t] of s.routes) if (alerts.some(a => a.route === r && !a.upcoming)) routes.set(r, t);
+        }
+        if (nearest < 20 || !routes.size) continue;                                   // a live stop is here
+        const g = { key: 'osm:' + o.id, ghost: true, lat: o.lat, lon: o.lon, title: o.name || 'Unnamed stop',
+                    stopId: '', osmRef: o.ref, routes, tags: new Map() };
+        g.missing = missingDirections(g);
+        if (g.missing.length) next.push(g);
+      }
+      ghosts = next;
+      drawGhosts();
+    }
+
+    function drawGhosts() {
+      ghostLayer.clearLayers();
+      const routeTag = $('routeFilter').value, z = map.getZoom();
+      for (const g of ghosts) {
+        if (routeTag && !g.routes.has(routeTag)) continue;
+        g.marker = L.circleMarker([g.lat, g.lon], {
+          renderer, radius: stopRadius(z, true), weight: 2, color: '#6b6b70', dashArray: '3 3', fillColor: '#ffffff', fillOpacity: 0.85,
+        }).bindPopup(() => ghostPopupHtml(g), popupOptions()).addTo(ghostLayer);
+      }
+    }
+
+    function ghostPopupHtml(g) {
+      const routes = [...new Set(g.missing.map(x => x.route))].sort((a, b) => parseInt(a) - parseInt(b));
+      const chips = routes.map(t => `<span class="chip" style="background:#8a8a90">${escapeHtml(t)}</span>`).join('');
+      return `<div class="popup"><h3>${escapeHtml(g.title)}</h3>
+        <div class="meta">Not in service right now${g.osmRef ? ' · stop #' + escapeHtml(g.osmRef) : ''}</div>${chips}
+        <div class="arrivals">` + boardingHtml(g) + advisoryHtml(g, stopDisruptions(g).filter(d => !d.bypass)) +
+        `<div class="none">This stop is on the street (mapped in OpenStreetMap) but isn't in the TTC's live data right now, so no vehicles are expected to stop here.</div></div></div>`;
+    }
+
     // Tapping a suggested stop jumps to it and opens its popup.
     document.addEventListener('click', e => {
       const a = e.target.closest('a[data-goto]');
@@ -657,6 +714,7 @@
     map.on('zoomend', () => {
       const z = map.getZoom();
       for (const st of stops.values()) if (st.marker) st.marker.setStyle({ radius: stopRadius(z, st.hit), weight: stopWeight(z, st.hit) });
+      for (const g of ghosts) g.marker?.setStyle({ radius: stopRadius(z, true) });
     });
 
     let loadedCount = 0, routeCount = 0;
@@ -704,6 +762,7 @@
       if (failed.length) $('status').textContent += ` · failed: ${failed.join(', ')}`;
       $('bar').style.display = 'none';
       await Promise.all([loadAlerts(), loadDetours()]);
+      await loadGhosts();                       // needs stops and alerts
     }
 
     ['showBus', 'showStreetcar', 'routeFilter'].forEach(id => $(id).addEventListener('change', () => updateStatus()));
@@ -734,6 +793,8 @@
     load();
     setInterval(loadAlerts, 2 * 60 * 1000);
     setInterval(loadDetours, 5 * 60 * 1000);
+    setInterval(loadGhosts, 15 * 60 * 1000);
+    $('routeFilter').addEventListener('change', drawGhosts);
     $('showDetours').addEventListener('change', drawDetours);
     $('routeFilter').addEventListener('change', drawDetours);
   </script>
