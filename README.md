@@ -40,8 +40,10 @@ A single-page map of every TTC bus and streetcar stop.
   OpenStreetMap once a day (Overpass API); where a mapped stop has no live stop and a route
   with a service change is missing a direction there, the page shows it as a grey dashed
   "not in service" stop with where to board instead.
-- **Route lines:** every route is drawn (from the TTC schedule, via `/api/network`, about
-  35 KB). Tap a line, a route chip in a stop popup, or pick from the route list to highlight
+- **Route lines:** every route is drawn from the TTC's live route data (via `/api/network`,
+  about 75 KB, rebuilt hourly), so the map follows routing changes the TTC has put into
+  service; replacement-bus branches are drawn as bus lines. Short-term detours the live data
+  doesn't reflect show as the TTC's dashed detour paths on top. Tap a line, a route chip in a stop popup, or pick from the route list to highlight
   that route: its live path is drawn bold, with parts off the regular route in orange and
   parts of the regular route not served in grey dots, plus any TTC detour path. Where several
   routes share a street, a tap asks which one. For streetcar routes the regular route comes

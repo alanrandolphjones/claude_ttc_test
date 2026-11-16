@@ -784,10 +784,11 @@
       return out;
     };
     const routeColor = r => isStreetcar(r) ? COLORS.streetcar : COLORS.bus;
-    const netStyle = (r, z, dim) => ({
-      renderer, color: routeColor(r), lineCap: 'round', lineJoin: 'round',
-      weight: (z >= 15 ? 4 : z >= 13 ? 3 : 1.8) + (isStreetcar(r) ? 1 : 0),
-      opacity: dim ? 0.15 : isStreetcar(r) ? 0.7 : 0.55,
+    // mode: 'streetcar' or 'bus' (replacement buses on streetcar routes are 'bus').
+    const netStyle = (mode, z, dim) => ({
+      renderer, color: mode === 'streetcar' ? COLORS.streetcar : COLORS.bus, lineCap: 'round', lineJoin: 'round',
+      weight: (z >= 15 ? 4 : z >= 13 ? 3 : 1.8) + (mode === 'streetcar' ? 1 : 0),
+      opacity: dim ? 0.15 : mode === 'streetcar' ? 0.7 : 0.55,
     });
     let networkLines = [], highlighted = null, highlightLines = [];
 
@@ -810,11 +811,12 @@
         networkLines = [];
         for (const route of data.routes || []) {
           for (const enc of route.lines) {
-            const line = L.polyline(decodeLine(enc), netStyle(route.r, z, !!highlighted)).on('click', e => {
+            const line = L.polyline(decodeLine(enc), netStyle(route.t, z, !!highlighted)).on('click', e => {
               L.DomEvent.stop(e);
-              routesAt(e.latlng, route.r);
+              routesAt(e.latlng, route.replacement ? (busBranches(route.r)[0] || route.r) : route.r);
             });
             line.route = route.r;
+            line.mode = route.t;
             networkLines.push(line.addTo(networkLayer));
           }
         }
@@ -824,7 +826,7 @@
 
     map.on('zoomend', () => {
       const z = map.getZoom();
-      networkLines.forEach(l => l.setStyle(netStyle(l.route, z, !!highlighted)));
+      networkLines.forEach(l => l.setStyle(netStyle(l.mode, z, !!highlighted)));
     });
 
     // Many streets carry several routes (King St: 504 and 304). A tap there asks which one.
@@ -837,7 +839,7 @@
           if (L.LineUtil.pointToSegmentDistance(p, pts[i - 1], pts[i]) <= 10) { found.add(l.route); break; }
         }
       }
-      const list = [...found].flatMap(r => [r, ...busBranches(r)]).sort((a, b) => parseInt(a) - parseInt(b) || a.localeCompare(b));
+      const list = [...new Set([...found].flatMap(r => [r, ...busBranches(r)]))].sort((a, b) => parseInt(a) - parseInt(b) || a.localeCompare(b));
       if (list.length === 1) return highlightRoute(list[0]);
       const chips = list.map(r => { const sp = splitRoute(r); return `<button type="button" class="chip" data-route="${escapeHtml(r)}" style="background:${sp.bus ? COLORS.bus : routeColor(r)}">${escapeHtml(r)}</button>` +
         ` <span class="meta">${escapeHtml((routeTitles.get(sp.base) || '').replace(/^\d+-/, ''))}${sp.bus ? ' replacement bus' : isStreetcar(r) ? ' streetcar' : ''}</span>`; }).join('<br>');
@@ -914,7 +916,7 @@
       map.closePopup();
       if ($('routeFilter').value !== r) $('routeFilter').value = r;
       updateStatus(); drawDetours(); drawGhosts();
-      networkLines.forEach(l => l.setStyle(netStyle(l.route, map.getZoom(), true)));
+      networkLines.forEach(l => l.setStyle(netStyle(l.mode, map.getZoom(), true)));
       const { base, bus } = splitRoute(r);
       const title = routeTitles.get(base) || base;
       const color = bus ? COLORS.bus : routeColor(base);
@@ -985,7 +987,7 @@
       $('routeCard').hidden = true;
       if ($('routeFilter').value) { $('routeFilter').value = ''; }
       updateStatus(); drawDetours(); drawGhosts();
-      networkLines.forEach(l => l.setStyle(netStyle(l.route, map.getZoom(), false)));
+      networkLines.forEach(l => l.setStyle(netStyle(l.mode, map.getZoom(), false)));
       restack();
     }
 
