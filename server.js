@@ -58,7 +58,8 @@ http.createServer(async (req, res) => {
     if (api) return send(res, 200, await api(url), 'application/json', { 'cache-control': 'public, max-age=30' });
     const file = url.pathname === '/' ? '/index.html' : url.pathname;
     if (!PUBLIC.has(file)) return send(res, 404, 'Not found', 'text/plain');
-    send(res, 200, await fs.readFile(path.join(ROOT, file)), 'text/html; charset=utf-8');
+    // no-cache: browsers check for a newer page each time, so updates show up on reload.
+    send(res, 200, await fs.readFile(path.join(ROOT, file)), 'text/html; charset=utf-8', { 'cache-control': 'no-cache' });
   } catch (e) {
     // Serve stale alerts rather than nothing if the TTC is briefly unreachable.
     if (url.pathname === '/api/alerts' && staleAlerts()) return send(res, 200, staleAlerts(), 'application/json', { 'x-stale': '1' });
