@@ -283,7 +283,8 @@
         // Streetcar not stopping here right now (only its replacement bus): show it greyed out.
         // Its own key, so a replacement bus without a branch letter (503) keeps its chip.
         if (isStreetcar(t) && ![...branches.values()].includes('streetcar')) branches.set(t + '\u0000off', 'off');
-        return [...branches].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).map(([key, mode]) => {
+        return [...branches].sort((a, b) => { const ka = a[0].split('\u0000')[0], kb = b[0].split('\u0000')[0];
+          return ka < kb ? -1 : ka > kb ? 1 : (a[1] === 'off' ? -1 : 1); }).map(([key, mode]) => {
           const code = key.split('\u0000')[0];
           return `<button type="button" class="chip${mode === 'off' ? ' off' : ''}" data-route="${escapeHtml(mode === 'bus' && isStreetcar(t) && code !== t ? code : t)}" style="background:${mode === 'off' ? '#b5b5ba' : mode === 'streetcar' ? COLORS.streetcar : COLORS.bus}" ` +
           `title="${mode === 'off' ? code + ' streetcar isn\'t stopping here right now. ' : mode === 'bus' && isStreetcar(t) ? 'Replacement bus. ' : ''}Show ${escapeHtml(stop.routes.get(t))} on the map">${escapeHtml(code)}</button>`; });
