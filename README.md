@@ -44,9 +44,15 @@ A single-page map of every TTC bus and streetcar stop.
   35 KB). Tap a line, a route chip in a stop popup, or pick from the route list to highlight
   that route: its live path is drawn bold, with parts off the regular route in orange and
   parts of the regular route not served in grey dots, plus any TTC detour path. Where several
-  routes share a street, a tap asks which one. The regular route comes from OpenStreetMap
-  route relations when available (the TTC writes long-running diversions into its schedule,
-  so the schedule can't show them), otherwise from the schedule.
+  routes share a street, a tap asks which one. For streetcar routes the regular route comes
+  from OpenStreetMap (tracks are carefully mapped, and the TTC writes long-running diversions
+  into its schedule, so the schedule can't show them); replacement-bus branches are drawn
+  separately, and the card says where the regular route has no streetcar but the bus covers
+  it. For bus routes, whose OSM mapping is patchier, "off the regular route" means off both
+  OSM and the schedule.
+- **Streetcar vs replacement bus at a stop:** stops are coloured and labelled by the branches
+  that actually serve them (e.g. "506 bus" at Yonge & College), and the "doesn't stop here"
+  check works per direction and per mode.
 - **Bus vs streetcar:** the live feed doesn't label vehicle type, so the streetcar route
   list in `index.html` (`STREETCAR_ROUTES`) is taken from the TTC's GTFS schedule data
   (Toronto Open Data, `routes.txt` where `route_type = 0`).

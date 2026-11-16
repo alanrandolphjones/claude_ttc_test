@@ -710,7 +710,7 @@
         // No server (static hosting): draw the live path straight from the TTC feed, without comparisons.
         try {
           const cfg = (await getJSON(`command=routeConfig&r=${encodeURIComponent(r)}`)).route;
-          data = { live: null, liveRaw: asArray(cfg.path).map(p => asArray(p.point).map(x => [+x.lat, +x.lon])), changed: [], notServed: [], normalSource: null };
+          data = { live: null, liveRaw: asArray(cfg.path).map(p => asArray(p.point).map(x => [+x.lat, +x.lon])), changed: [], notServed: [], replacementBus: [], notServedBusCovers: [], normalSource: null };
         } catch { data = null; }
       }
       if (highlighted !== r) return;          // the viewer picked another route meanwhile
@@ -720,8 +720,11 @@
 
       const live = data.liveRaw || data.live.map(decodeLine);
       const changed = data.changed.map(decodeLine), notServed = data.notServed.map(decodeLine);
+      const repBus = (data.replacementBus || []).map(decodeLine), busCovers = (data.notServedBusCovers || []).map(decodeLine);
       const add = (pts, style) => { const l = L.polyline(pts, { renderer, interactive: false, lineCap: 'round', lineJoin: 'round', ...style }); highlightLines.push(l.addTo(highlightLayer)); };
-      for (const pts of notServed) add(pts, { color: '#6b6b70', weight: 5, opacity: 0.9, dashArray: '2 9' });
+      for (const pts of [...notServed, ...busCovers]) add(pts, { color: '#6b6b70', weight: 5, opacity: 0.9, dashArray: '2 9' });
+      for (const pts of repBus) add(pts, { color: '#ffffff', weight: 8, opacity: 0.95 });
+      for (const pts of repBus) add(pts, { color: COLORS.bus, weight: 4, opacity: 1, dashArray: '9 6' });
       for (const pts of live) add(pts, { color: '#ffffff', weight: 10, opacity: 0.95 });          // casing
       for (const pts of live) add(pts, { color: routeColor(r), weight: 6, opacity: 1 });
       for (const pts of changed) add(pts, { color: '#f08c00', weight: 6, opacity: 1 });
@@ -730,12 +733,15 @@
       const hasDetour = detours.some(d => d.route === r);
       const hasAlert = alerts.some(a => a.route === r && !a.upcoming);
       const item = (style, text) => `<div class="it"><span class="sw" style="${style}"></span>${text}</div>`;
-      let legend = item(`border-top-color:${routeColor(r)}`, 'Where it runs now (TTC live data)');
-      if (changed.length) legend += item('border-top-color:#f08c00', 'Off its regular route');
-      if (notServed.length) legend += item('border-top-color:#6b6b70;border-top-style:dotted', 'Regular route, not served right now');
+      const mode = data.streetcar ? 'streetcar' : 'route';
+      let legend = item(`border-top-color:${routeColor(r)}`, data.streetcar ? 'Where the streetcar runs now (TTC live data)' : 'Where it runs now (TTC live data)');
+      if (repBus.length) legend += item(`border-top-color:${COLORS.bus};border-top-style:dashed`, 'Replacement bus');
+      if (changed.length) legend += item('border-top-color:#f08c00', data.streetcar ? 'Streetcar off its regular route' : 'Off its regular route');
+      if (notServed.length) legend += item('border-top-color:#6b6b70;border-top-style:dotted', data.streetcar ? 'Regular route with no streetcar or bus right now' : 'Regular route, not served right now');
+      if (busCovers.length) legend += item('border-top-color:#6b6b70;border-top-style:dotted', 'Regular route with no streetcar; the replacement bus covers it');
       if (hasDetour) legend += item('border-top-color:#f08c00;border-top-style:dashed', 'TTC detour path');
-      const src = data.normalSource === 'openstreetmap' ? 'OpenStreetMap' : data.normalSource === 'schedule' ? 'the TTC schedule' : null;
-      if (src && !changed.length && !notServed.length)
+      const src = { openstreetmap: 'OpenStreetMap', schedule: 'the TTC schedule', 'schedule+openstreetmap': 'the TTC schedule and OpenStreetMap' }[data.normalSource] || null;
+      if (src && !changed.length && !notServed.length && !busCovers.length)
         legend += `<div class="note">Same as its regular route (from ${src}).${hasAlert ? ' The TTC does report a service change on this route: tap a stop for details.' : ''}</div>`;
       else if (src) legend += `<div class="note">Regular route from ${src}.</div>`;
       $('rcLegend').innerHTML = legend;
@@ -794,7 +800,8 @@
         const g = { key: 'osm:' + o.id, ghost: true, lat: o.lat, lon: o.lon, title: o.name || 'Unnamed stop',
                     stopId: '', osmRef: o.ref, routes, tags: new Map() };
         g.missing = missingDirections(g);
-        if (g.missing.length) next.push(g);
+        // OSM often maps one stop twice (the pole and the stopping point on the road): keep one.
+        if (g.missing.length && !next.some(x => metres(x, g) < 25)) next.push(g);
       }
       ghosts = next;
       drawGhosts();
