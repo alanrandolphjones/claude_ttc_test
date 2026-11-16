@@ -277,7 +277,7 @@
     // The TTC doesn't allow browsers to read that feed directly, so server.js relays it.
     const ALERTS_URL = 'api/alerts';
     const BYPASS = new Set(['DETOUR', 'NO_SERVICE', 'REDUCED_SERVICE', 'STOP_MOVED', 'MODIFIED_SERVICE']);
-    let alerts = [], alertsOk = null, affectedKeys = new Set();
+    let alerts = [], alertsOk = null, affectedKeys = new Set(), alertRetries = 0;
 
     // alerts.ttc.ca marks "no end" as year 0001; GTFS-realtime alerts may have several periods.
     const periodsOf = a => (a.activePeriods?.length ? a.activePeriods : [a.activePeriod || {}]).map(p => ({
@@ -303,8 +303,12 @@
           // An upcoming alert never means "not stopping here" yet.
           .map(a => ({ ...a, upcoming: a.timing.state === 'upcoming', stopSet: new Set(asArray(a.stops).map(String)) }));
         alertsOk = true;
+        if (alertRetries) { alertRetries = 0; loadGhosts(); }      // back after a failure: refresh what depends on alerts
       } catch (e) {
         alertsOk = false;
+        // A failed load (often the server restarting for an update) shouldn't last until the next
+        // regular refresh: retry soon, backing off.
+        if (alertRetries < 6) setTimeout(loadAlerts, 5000 * 2 ** alertRetries++);
       }
       const surface = alerts.filter(a => !a.upcoming && (routeTitles.has(a.route) || !routeTitles.size));
       const routesHit = new Set(surface.map(a => a.route)).size;
@@ -312,7 +316,7 @@
       const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
       $('alertStatus').textContent = alertsOk
         ? `Service changes or alerts on ${plural(routesHit, 'route')} now` + (upcoming ? ` · ${upcoming} more planned soon` : '')
-        : 'Detour info unavailable (TTC alerts could not be loaded).';
+        : 'Couldn\'t load TTC service alerts; retrying…';
 
       const next = new Set();
       for (const [key, stop] of stops) if (stopDisruptions(stop).some(d => d.bypass)) next.add(key);
@@ -737,6 +741,69 @@
         .openOn(map);
     }
 
+    // ---- Drawing the highlighted route, one line per direction ---------------------------
+    // Each direction gets its own line, shifted a few pixels to its right-hand side (traffic
+    // keeps right), with arrows, so eastbound and westbound show side by side on shared
+    // streets and apart where they use different streets. Redrawn on zoom (offsets are pixels).
+    let hl = null;
+    const HL_OFFSET = 4;
+
+    function offsetLine(latlngs, px) {
+      const P = latlngs.map(ll => map.latLngToLayerPoint(ll));
+      return P.map((p, i) => {
+        const a = P[Math.max(0, i - 1)], b = P[Math.min(P.length - 1, i + 1)];
+        let dx = b.x - a.x, dy = b.y - a.y; const len = Math.hypot(dx, dy) || 1; dx /= len; dy /= len;
+        return map.layerPointToLatLng(L.point(p.x - dy * px, p.y + dx * px));   // right of travel (screen y points down)
+      });
+    }
+
+    function chevrons(latlngs, every = 120) {
+      const P = latlngs.map(ll => map.latLngToLayerPoint(ll)), out = [];
+      let next = every / 2, run = 0;
+      for (let i = 1; i < P.length; i++) {
+        const a = P[i - 1], b = P[i], len = a.distanceTo(b);
+        if (!len) continue;
+        const dx = (b.x - a.x) / len, dy = (b.y - a.y) / len, nx = -dy, ny = dx;
+        while (run + len >= next) {
+          const t = next - run, x = a.x + dx * t, y = a.y + dy * t;
+          out.push([L.point(x - dx * 3 + nx * 3.5, y - dy * 3 + ny * 3.5), L.point(x + dx * 3, y + dy * 3), L.point(x - dx * 3 - nx * 3.5, y - dy * 3 - ny * 3.5)]
+            .map(q => map.layerPointToLatLng(q)));
+          next += every;
+        }
+        run += len;
+      }
+      return out;
+    }
+
+    function drawHighlight() {
+      highlightLayer.clearLayers();
+      highlightLines = [];
+      if (!hl) return;
+      const { r, base, bus, color, data, live, changed, notServed, busCovers } = hl;
+      const add = (pts, style) => { const l = L.polyline(pts, { renderer, interactive: false, lineCap: 'round', lineJoin: 'round', ...style }); highlightLines.push(l.addTo(highlightLayer)); };
+      for (const pts of [...notServed, ...busCovers]) add(pts, { color: '#6b6b70', weight: 5, opacity: 0.9, dashArray: '2 9' });
+      const letter = splitRoute(r).letter;
+      const dirs = data.directionsComplete ? (data.directions || []).filter(d => bus
+        ? d.mode === 'bus' && branchLetter(d.title) === letter
+        : isStreetcar(base) ? d.mode === 'streetcar' : true) : [];
+      if (dirs.length) {
+        for (const d of dirs) {
+          const off = offsetLine(decodeLine(d.line), HL_OFFSET);
+          add(off, { color: '#ffffff', weight: 8, opacity: 0.95 });
+          add(off, { color, weight: 4.5, opacity: 1 });
+          for (const c of d.changed || []) add(offsetLine(decodeLine(c), HL_OFFSET), { color: '#f08c00', weight: 4.5, opacity: 1 });
+        }
+        // Arrows last, so they sit on top of both directions.
+        for (const d of dirs) for (const ch of chevrons(offsetLine(decodeLine(d.line), HL_OFFSET))) add(ch, { color: '#ffffff', weight: 2, opacity: 1 });
+      } else {
+        for (const pts of live) add(pts, { color: '#ffffff', weight: 10, opacity: 0.95 });
+        for (const pts of live) add(pts, { color, weight: 6, opacity: 1 });
+        for (const pts of changed) add(pts, { color: '#f08c00', weight: 6, opacity: 1 });
+      }
+      restack();
+    }
+    map.on('zoomend', () => { if (hl) drawHighlight(); });
+
     async function highlightRoute(r, opts = {}) {
       highlighted = r;
       map.closePopup();
@@ -772,12 +839,8 @@
       const repBus = (data.replacementBus || []).map(decodeLine), busCovers = (data.notServedBusCovers || []).map(decodeLine);
       const live = bus ? repBus : (data.liveRaw || data.live.map(decodeLine));
       const changed = bus ? [] : data.changed.map(decodeLine), notServed = bus ? [] : data.notServed.map(decodeLine);
-      const add = (pts, style) => { const l = L.polyline(pts, { renderer, interactive: false, lineCap: 'round', lineJoin: 'round', ...style }); highlightLines.push(l.addTo(highlightLayer)); };
-      for (const pts of [...notServed, ...busCovers]) add(pts, { color: '#6b6b70', weight: 5, opacity: 0.9, dashArray: '2 9' });
-      for (const pts of live) add(pts, { color: '#ffffff', weight: 10, opacity: 0.95 });          // casing
-      for (const pts of live) add(pts, { color, weight: 6, opacity: 1 });
-      for (const pts of changed) add(pts, { color: '#f08c00', weight: 6, opacity: 1 });
-      restack();
+      hl = { r, base, bus, color, data, live, changed, notServed, busCovers };
+      drawHighlight();
 
       const hasDetour = !bus && detours.some(d => d.route === base);
       const hasAlert = alerts.some(a => a.route === base && !a.upcoming);
@@ -785,12 +848,12 @@
       const linkTo = code => `<button type="button" class="chip" data-route="${escapeHtml(code)}" style="background:${splitRoute(code).bus ? COLORS.bus : routeColor(base)}">${escapeHtml(code)}</button>`;
       let legend;
       if (bus) {
-        legend = item(`border-top-color:${COLORS.bus}`, `Where the ${escapeHtml(r)} replacement bus runs (TTC live data)`);
+        legend = item(`border-top-color:${COLORS.bus}`, `Where the ${escapeHtml(r)} replacement bus runs, one line per direction (TTC live data)`);
         if (busCovers.length) legend += item('border-top-color:#6b6b70;border-top-style:dotted', `Regular ${escapeHtml(base)} streetcar route it stands in for`);
         legend += `<div class="note">The ${escapeHtml(r)} is a bus that replaces the ${escapeHtml(base)} streetcar on part of its route. ${linkTo(base)} streetcar</div>`;
       } else {
         const codes = busBranches(base);
-        legend = item(`border-top-color:${color}`, data.streetcar ? `Where the ${escapeHtml(base)} streetcar runs now (TTC live data)` : 'Where it runs now (TTC live data)');
+        legend = item(`border-top-color:${color}`, (data.streetcar ? `Where the ${escapeHtml(base)} streetcar runs now` : 'Where it runs now') + (data.directionsComplete ? ', one line per direction' : '') + ' (TTC live data)');
         if (changed.length) legend += item('border-top-color:#f08c00', data.streetcar ? 'Streetcar off its regular route' : 'Off its regular route');
         if (notServed.length) legend += item('border-top-color:#6b6b70;border-top-style:dotted', data.streetcar ? 'Regular route with no streetcar or bus right now' : 'Regular route, not served right now');
         if (busCovers.length) legend += item('border-top-color:#6b6b70;border-top-style:dotted', `Regular route with no streetcar; ${codes.length ? 'the ' + escapeHtml(codes.join(' / ')) + ' replacement bus covers it' : 'a replacement bus covers it'}`);
@@ -811,6 +874,7 @@
 
     function clearHighlight() {
       highlighted = null;
+      hl = null;
       highlightLayer.clearLayers();
       highlightLines = [];
       $('routeCard').hidden = true;
