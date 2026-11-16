@@ -4,6 +4,7 @@
 //   /api/alerts        live incidents (alerts.ttc.ca) + planned changes (GTFS-realtime), merged
 //   /api/detours       detour paths from the TTC's GTFS-realtime trip modifications feed
 //   /api/osm-stops     OpenStreetMap stops near routes with service changes (for out-of-service stops)
+//   /api/occupancy     how full each vehicle is (GTFS-realtime vehicle positions), by vehicle number
 //   /api/detour-stops  stops detoured trips actually serve (GTFS-realtime modified trip updates)
 //   /api/network       every bus/streetcar route line (from the schedule), for drawing the network
 //   /api/route?r=N     one route's live path and where it differs from the regular route
@@ -19,6 +20,7 @@ const observer = require('./lib/observer');
 const { getCandidates, osmStatus } = require('./lib/osm');
 const { getNetwork, getRoute } = require('./lib/routes');
 const { getDetourStops } = require('./lib/detourstops');
+const { getOccupancy } = require('./lib/occupancy');
 const zlib = require('node:zlib');
 
 const PORT = process.env.PORT || 8000;
@@ -43,6 +45,7 @@ const API = {
   '/api/osm-stops': async () => JSON.stringify(await getCandidates()),
   '/api/network': async () => getNetwork(),
   '/api/detour-stops': async () => JSON.stringify(await getDetourStops()),
+  '/api/occupancy': async () => getOccupancy(),
   '/api/route': async url => {
     const r = url.searchParams.get('r') || '';
     if (!/^\d{1,4}$/.test(r)) throw Object.assign(new Error('Unknown route'), { status: 400 });

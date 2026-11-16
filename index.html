@@ -52,6 +52,16 @@
     .arrivals .dir { font-size: 12px; color: #444; line-height: 1.3; }
     .arrivals .times { font-weight: 700; font-size: 13px; font-variant-numeric: tabular-nums; }
     .arrivals .none { color: #888; font-size: 12px; }
+    .arrivals .times { display: flex; flex-wrap: wrap; gap: 2px 14px; }
+    .crowd-key { color: #888; font-size: 11px; margin-top: 2px; }
+    .arrivals .t { display: inline-flex; flex-direction: column; }
+    .crowd { display: inline-flex; align-items: center; gap: 2px; font-size: 10.5px; font-weight: 600; color: #6b6b70; white-space: nowrap; }
+    .crowd i { display: inline-block; width: 4px; height: 9px; border-radius: 1px; background: #d4d4d8; }
+    .crowd i:last-of-type { margin-right: 3px; }
+    .crowd.c1 i:nth-child(1) { background: #2e9e5b; }
+    .crowd.c2 i:nth-child(-n+2) { background: #d9a400; }
+    .crowd.c3 i, .crowd.c4 i { background: #d4351c; }
+    .crowd.c4 { color: #b02a17; }
     .arrivals .updated { color: #888; font-size: 11px; margin-top: 6px; }
     .advisory { margin: 6px 0 8px; padding: 8px 9px; border-radius: 6px; background: #fff4e0; border: 1px solid #f0b54a; color: #4a3000; font-size: 12.5px; line-height: 1.4; }
     .advisory.delay { background: #fffbe6; border-color: #e6cf5a; }
@@ -757,6 +767,26 @@
       const list = detourTrips.filter(d => d.route === route);
       return list.find(d => dirTitle && d.headsign && dirTitle.toLowerCase().includes(d.headsign.toLowerCase())) || (list.length === 1 ? list[0] : null);
     }
+    // ---- How full each vehicle is (TTC GTFS-realtime vehicle positions, via server.js) -------
+    let occupancy = {};
+    async function loadOccupancy() {
+      try {
+        const res = await fetch('api/occupancy', { cache: 'no-store' });
+        if (res.ok) occupancy = (await res.json()).vehicles || {};
+      } catch { /* times still show without it */ }
+    }
+    const CROWD = {
+      EMPTY: ['Lots of seats', 1], MANY_SEATS_AVAILABLE: ['Lots of seats', 1], FEW_SEATS_AVAILABLE: ['Few seats', 2],
+      STANDING_ROOM_ONLY: ['Standing', 3], CRUSHED_STANDING_ROOM_ONLY: ['Very crowded', 4], FULL: ['Full', 4],
+      NOT_ACCEPTING_PASSENGERS: ['Not boarding', 4],
+    };
+    function crowdTag(vehicle) {
+      const c = CROWD[occupancy[vehicle]];
+      if (!c) return '';
+      // Bars always; words only once it's filling up, so a quiet stop stays compact.
+      return `<span class="crowd c${c[1]}" title="${c[0]}" aria-label="${c[0]}"><i></i><i></i><i></i>${c[1] >= 2 ? c[0] : ''}</span>`;
+    }
+
     const minsFrom = t => { const m = Math.round((t - Date.now()) / 60000); return m <= 0 ? 'Due' : m + ' min'; };
 
     // ---- Detour paths (TTC GTFS-realtime trip modifications, via server.js) ----------------
@@ -1170,6 +1200,7 @@
       stopArrivals();
       const seq = arrivalsSeq;
       const refresh = async () => {
+        await loadOccupancy();
         let html;
         try { html = arrivalsHtml(await fetchPredictions(stop), stop); }
         catch (e) { html = `<div class="none">Couldn't load arrival times (${escapeHtml(e.message)}).</div>`; }
@@ -1203,7 +1234,7 @@
           const list = asArray(d.prediction).filter(x => +x.seconds >= 0).sort((a, b) => a.seconds - b.seconds).slice(0, 3);
           if (!list.length) continue;
           rows.push({
-            route: p.routeTag, dir: d.title, first: +list[0].seconds, preds: list.map(x => +x.seconds),
+            route: p.routeTag, dir: d.title, first: +list[0].seconds, preds: list.map(x => +x.seconds), vehicles: list.map(x => x.vehicle),
             bypassed: bypassed(p.routeTag, d.title),
             // Streetcar routes run buses on "...Bus" branches when streetcars are replaced.
             shuttle: isStreetcar(p.routeTag) && list.some(x => /bus/i.test(x.dirTag || '')),
@@ -1223,9 +1254,9 @@
       if (!rows.length) return `<div class="none">No vehicles predicted right now.</div><div class="updated">Checked ${now}</div>` + advisory;
       return rows.map(r => `<div class="row${r.bypassed ? ' bypassed' : ''}">
           <span class="chip" style="background:${isStreetcar(r.route) && !r.shuttle ? COLORS.streetcar : COLORS.bus}">${escapeHtml(branchCode(r.route, r.dir))}</span>
-          <div><div class="times">${r.preds.map(fmt).join(', ')}</div>${r.bypassed ? '<span class="flag">Detoured: won\'t stop here</span>' : ''}
+          <div><div class="times">${r.preds.map((t, i) => `<span class="t">${fmt(t)}${crowdTag(r.vehicles[i])}</span>`).join('')}</div>${r.bypassed ? '<span class="flag">Detoured: won\'t stop here</span>' : ''}
           <div class="dir">${escapeHtml((DIR_NAME[dirWord(r.dir)] ? DIR_NAME[dirWord(r.dir)] + ' · ' : '') + branchName([r.route], r.dir))}</div></div>
-        </div>`).join('') + `<div class="updated">Live · updated ${now} · refreshes every 30s</div>` + advisory;
+        </div>`).join('') + `<div class="updated">Live · updated ${now} · refreshes every 30s${rows.some(r => r.vehicles.some(v => occupancy[v])) ? ' · bars: how full (TTC data)' : ''}</div>` + advisory;
     }
 
     function escapeHtml(s) {

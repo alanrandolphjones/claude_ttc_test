@@ -62,6 +62,10 @@ A single-page map of every TTC bus and streetcar stop.
   skipped stops name the first stop the detoured trips actually serve and list the rest.
 - **Route lines follow alerts:** routes with an active alert are rebuilt every 10 minutes and
   as soon as their alerts change; the page re-fetches the route map when alerts change.
+- **How full:** each arrival time shows how full that vehicle is, from the TTC's GTFS-realtime
+  vehicle positions (`occupancy_status`, via `/api/occupancy`, matched by vehicle number):
+  one green bar for lots of seats, two amber bars and "Few seats", three red bars and
+  "Standing" or "Full".
 - **Bus vs streetcar:** the live feed doesn't label vehicle type, so the streetcar route
   list in `index.html` (`STREETCAR_ROUTES`) is taken from the TTC's GTFS schedule data
   (Toronto Open Data, `routes.txt` where `route_type = 0`).
