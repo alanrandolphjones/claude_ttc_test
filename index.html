@@ -1412,8 +1412,8 @@
             btn.classList.remove('busy');
             const ll = [pos.coords.latitude, pos.coords.longitude], acc = Math.min(pos.coords.accuracy || 0, 2000);
             youLayer.clearLayers();
-            L.circle(ll, { radius: acc, color: '#1a73e8', weight: 1, fillColor: '#1a73e8', fillOpacity: 0.12, interactive: false }).addTo(youLayer);
-            L.circleMarker(ll, { radius: 7, color: '#fff', weight: 2.5, fillColor: '#1a73e8', fillOpacity: 1, interactive: false }).addTo(youLayer);
+            L.circle(ll, { renderer, radius: acc, color: '#1a73e8', weight: 1, fillColor: '#1a73e8', fillOpacity: 0.12, interactive: false }).addTo(youLayer);
+            L.circleMarker(ll, { renderer, radius: 7, color: '#fff', weight: 2.5, fillColor: '#1a73e8', fillOpacity: 1, interactive: false }).addTo(youLayer);
             map.setView(ll, Math.max(map.getZoom(), 16));
             if (ll[0] < 43.55 || ll[0] > 43.9 || ll[1] < -79.7 || ll[1] > -79.05) toast('You\'re outside the TTC area.');
           }, err => {
