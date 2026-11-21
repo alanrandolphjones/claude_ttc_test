@@ -55,6 +55,7 @@
     .arrivals .times { display: flex; flex-wrap: wrap; gap: 2px 14px; }
     .crowd-key { color: #888; font-size: 11px; margin-top: 2px; }
     .arrivals .t { display: inline-flex; flex-direction: column; }
+    .ghost-note { margin-top: 3px; font-size: 11.5px; font-weight: 600; color: #a15c00; }
     .crowd { display: inline-flex; align-items: center; gap: 2px; font-size: 10.5px; font-weight: 600; color: #6b6b70; white-space: nowrap; }
     .crowd i { display: inline-block; width: 4px; height: 9px; border-radius: 1px; background: #d4d4d8; }
     .crowd i:last-of-type { margin-right: 3px; }
@@ -795,6 +796,45 @@
       STANDING_ROOM_ONLY: ['Standing', 3], CRUSHED_STANDING_ROOM_ONLY: ['Very crowded', 4], FULL: ['Full', 4],
       NOT_ACCEPTING_PASSENGERS: ['Not boarding', 4],
     };
+    // ---- What the ghost tracker learned (14-day summary, via server.js) -------------------
+    let ghostStats = null, gtfsAtStop = {};
+    async function loadGhostStats() {
+      if (ghostStats && Date.now() - ghostStats.loadedAt < 3600e3) return;
+      try { const res = await fetch('api/ghost-stats'); if (res.ok) ghostStats = { ...(await res.json()), loadedAt: Date.now() }; } catch { /* optional */ }
+    }
+    async function loadGtfsAtStop(stop) {
+      gtfsAtStop = {};
+      if (!stop.stopId) return;
+      try { const res = await fetch('api/gtfs-stop?ids=' + encodeURIComponent(stop.stopId)); if (res.ok) gtfsAtStop = (await res.json()).stops[stop.stopId] || []; } catch { /* optional */ }
+    }
+    // Times over 15 min ahead: NextBus runs optimistic there, and GTFS-realtime was closer in the
+    // tracker's data. Use GTFS-realtime's time for the same vehicle, else correct NextBus's bias.
+    const LONG_MS = 15 * 60e3;
+    function bestTime(route, vehicle, nbMs) {
+      if (nbMs - Date.now() < LONG_MS) return { t: nbMs, adj: null };
+      const g = Array.isArray(gtfsAtStop) && vehicle && gtfsAtStop.find(x => x.v === vehicle && x.r === route && Math.abs(x.t - nbMs) < 20 * 60e3);
+      if (g) return { t: g.t, adj: 'gtfs' };
+      const bias = ghostStats?.meanErrorMinutes?.nextbus?.['15-30'];
+      return Number.isFinite(bias) && Math.abs(bias) >= 0.5 ? { t: nbMs + bias * 60e3, adj: 'bias' } : { t: nbMs, adj: null };
+    }
+    // How often predicted vehicles of this route didn't show, last 14 days (NextBus, what we show).
+    function ghostRisk(route) {
+      const r = ghostStats?.routes?.[route];
+      const x = r?.nextbus?.checked >= 200 ? r.nextbus : r?.gtfsrt?.checked >= 200 ? r.gtfsrt : null;
+      if (!x) return null;
+      const rate = x.ghosts / x.checked;
+      return rate >= 0.07 ? { rate, oneIn: Math.max(2, Math.round(1 / rate)) } : null;
+    }
+
+    function ghostNote(route) {
+      const risk = ghostRisk(route), detoured = detours.some(d => d.route === route) || detourTrips.some(d => d.route === route);
+      if (!risk && !detoured) return '';
+      const parts = [];
+      if (risk) parts.push(`about 1 in ${risk.oneIn} predicted ${escapeHtml(route)}s didn't show up in the last two weeks`);
+      if (detoured) parts.push('a detour is in effect');
+      return `<div class="ghost-note" title="From this app's ghost tracker and TTC detour data">May not come: ${parts.join('; ')}.</div>`;
+    }
+
     function crowdTag(vehicle) {
       const c = CROWD[occupancy[vehicle]];
       if (!c) return '';
@@ -1215,7 +1255,7 @@
       stopArrivals();
       const seq = arrivalsSeq;
       const refresh = async () => {
-        await loadOccupancy();
+        await Promise.all([loadOccupancy(), loadGhostStats(), loadGtfsAtStop(stop)]);
         let html;
         try { html = arrivalsHtml(await fetchPredictions(stop), stop); }
         catch (e) { html = `<div class="none">Couldn't load arrival times (${escapeHtml(e.message)}).</div>`; }
@@ -1249,7 +1289,12 @@
           const list = asArray(d.prediction).filter(x => +x.seconds >= 0).sort((a, b) => a.seconds - b.seconds).slice(0, 3);
           if (!list.length) continue;
           rows.push({
-            route: p.routeTag, dir: d.title, first: +list[0].seconds, preds: list.map(x => +x.seconds), vehicles: list.map(x => x.vehicle),
+            route: p.routeTag, dir: d.title, first: +list[0].seconds,
+            // Best time per vehicle (see bestTime), kept in arrival order.
+            ...(() => {
+              const b = list.map(x => ({ v: x.vehicle, ...bestTime(p.routeTag, x.vehicle, +x.epochTime || Date.now() + x.seconds * 1000) })).sort((m, n) => m.t - n.t);
+              return { vehicles: b.map(x => x.v), preds: b.map(x => Math.max(0, Math.round((x.t - Date.now()) / 1000))), adj: b.map(x => x.adj) };
+            })(),
             bypassed: bypassed(p.routeTag, d.title),
             // Streetcar routes run buses on "...Bus" branches when streetcars are replaced.
             shuttle: isStreetcar(p.routeTag) && list.some(x => /bus/i.test(x.dirTag || '')),
@@ -1269,9 +1314,9 @@
       if (!rows.length) return `<div class="none">No vehicles predicted right now.</div><div class="updated">Checked ${now}</div>` + advisory;
       return rows.map(r => `<div class="row${r.bypassed ? ' bypassed' : ''}">
           <span class="chip" style="background:${isStreetcar(r.route) && !r.shuttle ? COLORS.streetcar : COLORS.bus}">${escapeHtml(branchCode(r.route, r.dir))}</span>
-          <div><div class="times">${r.preds.map((t, i) => `<span class="t">${fmt(t)}${crowdTag(r.vehicles[i])}</span>`).join('')}</div>${r.bypassed ? '<span class="flag">Detoured: won\'t stop here</span>' : ''}
-          <div class="dir">${escapeHtml((DIR_NAME[dirWord(r.dir)] ? DIR_NAME[dirWord(r.dir)] + ' · ' : '') + branchName([r.route], r.dir))}</div></div>
-        </div>`).join('') + `<div class="updated">Live · updated ${now} · refreshes every 30s${rows.some(r => r.vehicles.some(v => occupancy[v])) ? ' · bars: how full (TTC data)' : ''}</div>` + advisory;
+          <div><div class="times">${r.preds.map((t, i) => `<span class="t"${r.adj[i] ? ` title="${r.adj[i] === 'gtfs' ? 'From the TTC\'s other prediction feed, which is closer this far out' : 'Adjusted: this feed usually runs optimistic this far out'}"` : ''}>${r.adj[i] ? '~' : ''}${fmt(t)}${crowdTag(r.vehicles[i])}</span>`).join('')}</div>${r.bypassed ? '<span class="flag">Detoured: won\'t stop here</span>' : ''}
+          <div class="dir">${escapeHtml((DIR_NAME[dirWord(r.dir)] ? DIR_NAME[dirWord(r.dir)] + ' · ' : '') + branchName([r.route], r.dir))}</div>${ghostNote(r.route)}</div>
+        </div>`).join('') + `<div class="updated">Live · updated ${now} · refreshes every 30s${rows.some(r => r.vehicles.some(v => occupancy[v])) ? ' · bars: how full (TTC data)' : ''}${rows.some(r => r.adj.some(Boolean)) ? ' · ~ adjusted for accuracy' : ''}</div>` + advisory;
     }
 
     function escapeHtml(s) {

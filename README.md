@@ -90,6 +90,19 @@ ahead they were made. The `Ghost tracker` GitHub Actions workflow runs it for 50
 hour (on public repositories) and commits results to the `ghost-data` branch. Summarize with
 `node scripts/ghost-report.js runs/` in a checkout of that branch.
 
+### What the app does with it
+
+Each tracker run also writes `summary.json` (last 14 days: ghosts per route and feed, each
+feed's mean error by lead time) to the `ghost-data` branch; the server relays it at
+`/api/ghost-stats`. The app uses it to:
+
+- **warn** on routes where at least 7% of predicted vehicles didn't show ("May not come:
+  about 1 in 9 predicted 504s didn't show up in the last two weeks"), and on routes with an
+  active TTC detour;
+- **improve times more than 15 minutes out**, where NextBus runs optimistic: it uses the
+  GTFS-realtime prediction for the same vehicle (`/api/gtfs-stop`), else corrects NextBus by
+  its measured bias. Adjusted times show with a "~".
+
 ## Feed-disagreement observer
 
 The TTC's sources don't always agree: an alert may say stops are skipped while the live feed

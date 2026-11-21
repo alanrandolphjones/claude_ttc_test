@@ -50,6 +50,7 @@ jobs:
           fi
           mkdir -p "data-branch/runs/$(dirname "$STAMP")"
           cp "out/$STAMP.json" "data-branch/runs/$STAMP.json"
+          node scripts/ghost-summary.js data-branch/runs 14 > data-branch/summary.json
           cd data-branch
           git add -A
           git commit -q -m "Ghost tracker run $STAMP"
